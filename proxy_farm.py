@@ -406,19 +406,11 @@ class SeekerAndBucket:
         self.log("Seeker Thread Started. Harvesting IPs...")
         from concurrent.futures import ThreadPoolExecutor
         
-        strategies = [
-            KeepaliveStrategy.SESSION_HTTPS.value,
-            KeepaliveStrategy.SSE_STREAM.value,
-            KeepaliveStrategy.SIM_BROWSING.value,
-            KeepaliveStrategy.TCP_NULL_DRIP.value,
-            KeepaliveStrategy.UDP_DRIP.value,
-            KeepaliveStrategy.OS_KEEPALIVE.value,
-            KeepaliveStrategy.ICMP_PING6.value
-        ]
         strategy_idx = 0
         
         while self.active:
             current_unique = set()
+            active_anchors = set() # Track IPs already anchored in this sweep
             
             # Battle Royale: Assign different strategies to each node for testing
             strategies = [
@@ -430,6 +422,7 @@ class SeekerAndBucket:
                 KeepaliveStrategy.ICMP_PING6.value
             ]
             
+            # 1. Ensure all nodes have a strategy (Battle Royale)
             for i, node in enumerate(self.core.nodes):
                 if node.strategy == KeepaliveStrategy.DRIFT.value:
                     strat = strategies[i % len(strategies)]
@@ -437,45 +430,52 @@ class SeekerAndBucket:
 
             dns64_ip = self.core.net_info.get('dns64_ip') if self.core.net_info else None
             
+            # 2. Health Check all nodes
             def check_and_update(node):
                 ip, latency = self.health_checker.check_node(node.external_port, dns64_ip)
-                node.public_ipv4 = ip
-                node.is_alive = bool(ip)
-                node.latency_ms = latency
-                return node, ip
+                return node, ip, latency
 
             with ThreadPoolExecutor(max_workers=6) as executor:
                 results = list(executor.map(check_and_update, self.core.nodes))
 
-            for node, ip in results:
+            # 3. Process Results
+            for node, ip, latency in results:
                 self.stats['total_checks'] += 1
+                
                 if ip:
-                    current_unique.add(ip)
-                    if ip not in self.seen_ips:
-                        self.seen_ips.add(ip)
-                        self.db.record_ip(ip)
-                        self.log(f"Node {node.node_id} ► {ip} [UNIQUE]")
+                    # Stability Check: Did the IP change while anchored?
+                    if node.public_ipv4 and node.public_ipv4 != ip:
+                        self.log(f"⚠️ Node {node.node_id} IP ROTATED: {node.public_ipv4} -> {ip} (Strategy: {node.strategy})")
+                    
+                    node.public_ipv4 = ip
+                    node.is_alive = True
+                    node.latency_ms = latency
+                    
+                    # Duplicate Detection & Resolution
+                    if ip in current_unique:
+                        self.log(f"Node {node.node_id} ► {ip} [DUPLICATE_ACTIVE] -> Triggering Rotation...")
+                        if getattr(self.core, 'auto_rotate', True):
+                            # Run rotation in a separate thread to not block the monitor
+                            threading.Thread(target=self.core.rotate_node, args=(node.node_id,), daemon=True).start()
                     else:
-                        self.log(f"Node {node.node_id} ► {ip} [DUPLICATE]")
-                        
-                    # AUTO-ANCHOR LOGIC
-                    if getattr(self.core, 'auto_anchor', True):
-                        if node.strategy == KeepaliveStrategy.DRIFT.value:
-                            if ip not in active_anchors:
-                                strat = strategies[strategy_idx % len(strategies)]
-                                strategy_idx += 1
-                                self.log(f"⚓ AUTO-ANCHOR: Locking Node {node.node_id} to {ip} via {strat}")
-                                self.core.lab_manager.assign_strategy(node.node_id, strat)
-                                active_anchors.add(ip)
+                        current_unique.add(ip)
+                        if ip not in self.seen_ips:
+                            self.seen_ips.add(ip)
+                            self.db.record_ip(ip)
+                            self.log(f"Node {node.node_id} ► {ip} [UNIQUE]")
+                        else:
+                            self.log(f"Node {node.node_id} ► {ip} [DUPLICATE_HISTORY]")
                 else:
+                    node.is_alive = False
                     node.consecutive_failures += 1
                     self.log(f"Node {node.node_id} ► CONNECTION FAILED")
+                    # If anchor lost, revert to DRIFT to find a new IP
                     if getattr(self.core, 'auto_anchor', True) and node.strategy != KeepaliveStrategy.DRIFT.value:
                         self.log(f"⚠️ Node {node.node_id} lost anchor. Reverting to DRIFT mode.")
                         self.core.lab_manager.assign_strategy(node.node_id, KeepaliveStrategy.DRIFT.value)
 
             self.unique_count = len(current_unique)
-            time.sleep(15) # 15s refresh as requested
+            time.sleep(15)
 
     def get_hunting_status(self):
         return {
@@ -585,17 +585,23 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.SSE_STREAM.value:
                     target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
-                    url = f"https://[{target_ip}]/v2/stream/recentchange"
-                    # Use curl through the proxy to keep the downstream open
-                    cmd = ['curl', '-g', '-N', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', 'Host: stream.wikimedia.org', url]
-                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    # Use curl with --resolve to handle SSL/SNI correctly over IPv6 literal
+                    cmd = [
+                        'curl', '-g', '-N', '-s', '-k',
+                        '--socks5-hostname', f'127.0.0.1:{node.external_port}',
+                        '--resolve', f'stream.wikimedia.org:443:{target_ip}',
+                        'https://stream.wikimedia.org/v2/stream/recentchange'
+                    ]
                     while self.running and node.strategy_gen == gen:
-                        line = proc.stdout.readline()
-                        if line:
-                            node.pulse_count += 1
-                            node.bytes_sent += len(line)
-                        if proc.poll() is not None: break
-                    if proc.poll() is None: proc.terminate()
+                        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                        for line in iter(proc.stdout.readline, b''):
+                            if not self.running or node.strategy_gen != gen: break
+                            if line:
+                                node.pulse_count += 1
+                                node.bytes_sent += len(line)
+                        proc.terminate()
+                        if self.running and node.strategy_gen == gen:
+                            time.sleep(2) # Restart delay
 
                 elif strategy == KeepaliveStrategy.SIM_BROWSING.value:
                     hosts = ["api.ipify.org", "www.google.com", "www.wikipedia.org"]
@@ -631,17 +637,24 @@ class KeepAliveEngine:
                     finally: s.close()
 
                 elif strategy == KeepaliveStrategy.UDP_DRIP.value:
+                    # Use raw socket for UDP to avoid PySocks limitations
                     target_ip = self._resolve_dns64(adb, "8.8.8.8")
-                    s = socks.socksocket(socket.AF_INET6, socket.SOCK_DGRAM)
-                    s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
                     while self.running and node.strategy_gen == gen:
                         try:
-                            s.sendto(b'\x00', (target_ip, 53, 0, 0))
-                            node.bytes_sent += 1
-                            node.pulse_count += 1
-                            time.sleep(1)
-                        except: break
-                    s.close()
+                            # We use a simple trick: send a UDP packet to the proxy's UDP associate port
+                            # But since we don't have a full SOCKS5 UDP client here, we'll use 'nc'
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '53']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            while self.running and node.strategy_gen == gen:
+                                proc.stdin.write(b'\x00')
+                                proc.stdin.flush()
+                                node.pulse_count += 1
+                                node.bytes_sent += 1
+                                time.sleep(1)
+                                if proc.poll() is not None: break
+                            proc.terminate()
+                        except: pass
+                        time.sleep(2)
 
                 elif strategy == KeepaliveStrategy.OS_KEEPALIVE.value:
                     # Target api.ipify.org via Proxy with OS-level keep-alives
@@ -764,6 +777,41 @@ class ProxyFarmCore:
             
         if was_monitoring:
             self.start_monitoring()
+        return True
+
+    def rotate_node(self, node_id):
+        """Rotates a single node's IP by changing its source IPv6 address."""
+        node = next((n for n in self.nodes if n.node_id == node_id), None)
+        if not node: return False
+        
+        logger.info(f"🔄 ROTATING Node {node_id} to find a unique IP...")
+        
+        # 1. Stop current keep-alive
+        self.lab_manager.engine.stop_strategy(node)
+        
+        # 2. Pick a new random IPv6 suffix
+        new_suffix = random.randint(1000, 9999)
+        prefix = self.net_info.get('nat64_prefix')
+        new_vip6 = f"{prefix}::{new_suffix}"
+        
+        # 3. Update routing on the phone
+        table_id = self.net_info.get('table_id')
+        
+        # Kill old microsocks for this port
+        self.adb.run_shell(f"pkill -f 'microsocks -i 127.0.0.1 -p {node.external_port}'", root=True)
+        
+        # Add new IPv6 address and rule
+        self.adb.run_shell(f"ip -6 addr add {new_vip6}/128 dev lo", root=True)
+        self.adb.run_shell(f"ip -6 rule add from {new_vip6}/128 pref 1 table {table_id}", root=True)
+        
+        # Update node object
+        node.ipv6_address = new_vip6
+        node.public_ipv4 = None # Reset for re-detection
+        node.strategy = KeepaliveStrategy.DRIFT.value
+        
+        # 4. Restart microsocks
+        self.adb.run_shell(f"nohup /data/data/com.termux/files/usr/bin/microsocks -i 127.0.0.1 -p {node.external_port} -b {new_vip6} > /data/local/tmp/microsocks_{node.external_port}.log 2>&1 &", root=True)
+        
         return True
 
     def toggle_auto_rotation(self, enabled):
