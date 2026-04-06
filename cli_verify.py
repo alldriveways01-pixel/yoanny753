@@ -64,17 +64,31 @@ def main():
     print(Fore.BLUE + "[*] Starting Seeker and Keep-Alive Engine...")
     core.start_monitoring()
 
-    print(Fore.YELLOW + "[!] Entering Monitoring Loop. Press Ctrl+C to stop.")
+    print(Fore.YELLOW + "[!] Entering Monitoring Loop. Press 'L' for Lab Mode (Stop Seeker), or Ctrl+C to stop all.")
     print()
 
+    lab_mode = False
     try:
+        import select
         while True:
+            # Check for keyboard input to toggle Lab Mode
+            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if line.strip().lower() == 'l':
+                    lab_mode = not lab_mode
+                    if lab_mode:
+                        print(Fore.MAGENTA + "\n[🧪] LAB MODE ACTIVE: Stopping Seeker. Keep-Alives will run in silence.")
+                        core.seeker.stop()
+                    else:
+                        print(Fore.BLUE + "\n[🔍] SEEKER RESUMED: Monitoring active.")
+                        core.start_monitoring()
+
             # Print the table
             print_status_table(core.nodes)
             
             # Print unique IP count
             unique_ips = len(core.seeker.seen_ips)
-            print(f"\n{Fore.MAGENTA}Total Unique IPs Discovered: {unique_ips}")
+            print(f"\n{Fore.MAGENTA}Total Unique IPs Discovered: {unique_ips} | Lab Mode: {'ON' if lab_mode else 'OFF'}")
             
             # Print recent logs from the seeker
             if core.seeker.logs:

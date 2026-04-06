@@ -546,17 +546,17 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.SSE_STREAM.value:
                     target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
+                    # Use -g to disable globbing for IPv6 brackets and -m for max time
                     url = f"https://[{target_ip}]/v2/stream/recentchange"
-                    # Persistent curl stream
-                    cmd = ['curl', '-N', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', 'Host: stream.wikimedia.org', url]
+                    cmd = ['curl', '-g', '-N', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', 'Host: stream.wikimedia.org', url]
                     node_log("Starting SSE Stream...")
                     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        time.sleep(2)
+                        time.sleep(5)
                         if proc.poll() is not None:
                             node_log("Stream disconnected, restarting...")
                             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    proc.terminate()
+                    if proc.poll() is None: proc.terminate()
 
                 elif strategy == KeepaliveStrategy.SIM_BROWSING.value:
                     # Target api.ipify.org primarily to pin the health check IP
@@ -574,27 +574,34 @@ class KeepAliveEngine:
                     target_ip = self._resolve_dns64(adb, check_host)
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.settimeout(5)
+                    s.settimeout(10)
                     s.connect((target_ip, 80))
-                    node_log(f"TCP Drip active on {check_host}")
+                    node_log(f"TCP Pulse active on {check_host}")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         try:
-                            s.sendall(b'\x00')
-                            time.sleep(3)
+                            # Send a valid but minimal HTTP request instead of a null byte to avoid "Broken Pipe"
+                            s.sendall(b"HEAD / HTTP/1.1\r\nHost: api.ipify.org\r\n\r\n")
+                            time.sleep(5)
                         except Exception as e:
-                            node_log(f"TCP Drip error: {e}, reconnecting...")
+                            node_log(f"TCP Pulse error: {e}, reconnecting...")
                             break
                     s.close()
 
                 elif strategy == KeepaliveStrategy.UDP_DRIP.value:
                     # UDP is often more effective at keeping NAT sessions open
                     target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    # Use a standard socket for UDP if possible, or fix the socks tuple
                     s = socks.socksocket(socket.AF_INET6, socket.SOCK_DGRAM)
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
                     node_log(f"UDP Drip active to {target_ip}")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        s.sendto(b'\x00', (target_ip, 53))
-                        time.sleep(2)
+                        try:
+                            # Use the correct 4-tuple for IPv6 to avoid "too many values to unpack"
+                            s.sendto(b'\x00', (target_ip, 53, 0, 0))
+                            time.sleep(2)
+                        except Exception as e:
+                            node_log(f"UDP Drip error: {e}, reconnecting...")
+                            break
                     s.close()
 
                 elif strategy == KeepaliveStrategy.OS_KEEPALIVE.value:
