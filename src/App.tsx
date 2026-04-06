@@ -17,9 +17,12 @@ function cn(...inputs: ClassValue[]) {
 }
 
 class ErrorBoundary extends Component<{children: React.ReactNode}, {hasError: boolean, error: Error | null}> {
+  state: { hasError: boolean, error: Error | null } = { hasError: false, error: null };
+  props: { children: React.ReactNode };
+
   constructor(props: {children: React.ReactNode}) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.props = props;
   }
 
   static getDerivedStateFromError(error: Error) {
@@ -67,7 +70,7 @@ const Card = ({ children, className, title, icon: Icon, action }: any) => (
 
 // --- TABS ---
 
-function MainDashboard({ state, dispatch, socket }: any) {
+function MainDashboard({ state, dispatch, socket, backendUrl }: any) {
   const logsContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -266,7 +269,8 @@ function MainDashboard({ state, dispatch, socket }: any) {
                 <th className="px-4 py-3 font-medium">Port</th>
                 <th className="px-4 py-3 font-medium">IPv4 Address</th>
                 <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Latency</th>
+                <th className="px-4 py-3 font-medium">Pulses</th>
+                <th className="px-4 py-3 font-medium">Sent (KB)</th>
                 <th className="px-4 py-3 font-medium">Strategy</th>
                 <th className="px-4 py-3 font-medium text-right">Success Rate</th>
               </tr>
@@ -284,8 +288,11 @@ function MainDashboard({ state, dispatch, socket }: any) {
                       {node.is_alive ? 'ALIVE' : 'DEAD'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-slate-400">
-                    {node.is_alive ? `${node.latency_ms}ms` : '--'}
+                  <td className="px-4 py-3 font-mono text-emerald-400">
+                    {node.pulse_count}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-amber-400">
+                    {(node.bytes_sent / 1024).toFixed(1)}
                   </td>
                   <td className="px-4 py-3 text-slate-300 text-xs">{node.strategy}</td>
                   <td className="px-4 py-3 text-right">
@@ -422,21 +429,25 @@ function KeepaliveLab({ state, backendUrl, socket }: any) {
                   <th className="px-4 py-3 font-medium">Strategy</th>
                   <th className="px-4 py-3 font-medium">Nodes Alive</th>
                   <th className="px-4 py-3 font-medium">Total %</th>
-                  <th className="px-4 py-3 font-medium">Avg Lifetime</th>
-                  <th className="px-4 py-3 font-medium">Bandwidth</th>
+                  <th className="px-4 py-3 font-medium">Pulses</th>
+                  <th className="px-4 py-3 font-medium">Bandwidth (KB)</th>
                 </tr>
               </thead>
               <tbody>
                 {strategies.map(strat => {
                   const stats = getStrategyStats(strat.id);
                   const percent = stats.total > 0 ? Math.round((stats.alive / stats.total) * 100) : 0;
+                  const stratNodes = state.nodes.filter((n: any) => n.strategy === strat.id);
+                  const totalPulses = stratNodes.reduce((acc: number, n: any) => acc + (n.pulse_count || 0), 0);
+                  const totalKB = stratNodes.reduce((acc: number, n: any) => acc + (n.bytes_sent || 0), 0) / 1024;
+                  
                   return (
                     <tr key={strat.id} className="border-b border-slate-800/50">
                       <td className="px-4 py-3 text-slate-300">{strat.name}</td>
                       <td className="px-4 py-3 font-mono text-emerald-400">{stats.alive}/{stats.total}</td>
                       <td className="px-4 py-3 font-mono text-slate-400">{percent}%</td>
-                      <td className="px-4 py-3 font-mono text-slate-400">Live</td>
-                      <td className="px-4 py-3 font-mono text-slate-400">--</td>
+                      <td className="px-4 py-3 font-mono text-emerald-400">{totalPulses}</td>
+                      <td className="px-4 py-3 font-mono text-amber-400">{totalKB.toFixed(1)}</td>
                     </tr>
                   );
                 })}
@@ -794,7 +805,7 @@ function AppContent() {
           </div>
         )}
 
-        {activeTab === 'dashboard' && <MainDashboard state={state} dispatch={dispatch} socket={socket} />}
+        {activeTab === 'dashboard' && <MainDashboard state={state} dispatch={dispatch} socket={socket} backendUrl={backendUrl} />}
         {activeTab === 'lab' && <KeepaliveLab state={state} backendUrl={backendUrl} socket={socket} />}
         {activeTab === 'analysis' && <AdvancedAnalysis />}
       </main>

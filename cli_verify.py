@@ -32,18 +32,17 @@ def print_status_table(nodes):
     # Clear screen (optional, but makes it look like a dashboard)
     # os.system('cls' if os.name == 'nt' else 'clear')
     
-    print(Fore.YELLOW + f"{'ID':<4} | {'PORT':<6} | {'IPV6 (LOCAL)':<20} | {'IPV4 (PUBLIC)':<15} | {'LATENCY':<8} | {'STRATEGY':<15} | {'STATUS':<8}")
+    print(Fore.YELLOW + f"{'ID':<4} | {'PORT':<6} | {'IPV4 (PUBLIC)':<15} | {'PULSES':<8} | {'SENT (KB)':<10} | {'STRATEGY':<15} | {'STATUS':<8}")
     print("-" * 85)
     
     for node in nodes:
         status_color = Fore.GREEN if node.is_alive else Fore.RED
         status_text = "ALIVE" if node.is_alive else "DEAD"
         
-        ipv6_short = (node.ipv6_address[:17] + "...") if len(node.ipv6_address) > 20 else node.ipv6_address
         ipv4_text = node.public_ipv4 if node.public_ipv4 else "PENDING..."
-        latency_text = f"{node.latency_ms}ms" if node.latency_ms > 0 else "N/A"
+        kb_sent = node.bytes_sent / 1024
         
-        print(f"{node.node_id:<4} | {node.external_port:<6} | {ipv6_short:<20} | {ipv4_text:<15} | {latency_text:<8} | {node.strategy:<15} | {status_color}{status_text}")
+        print(f"{node.node_id:<4} | {node.external_port:<6} | {ipv4_text:<15} | {node.pulse_count:<8} | {kb_sent:<10.1f} | {node.strategy:<15} | {status_color}{status_text}")
 
 def main():
     print_banner()

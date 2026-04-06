@@ -419,12 +419,21 @@ class SeekerAndBucket:
         
         while self.active:
             current_unique = set()
-            active_anchors = set()
             
-            # First pass: record currently anchored IPs
-            for node in self.core.nodes:
-                if node.strategy != KeepaliveStrategy.DRIFT.value and node.public_ipv4:
-                    active_anchors.add(node.public_ipv4)
+            # Battle Royale: Assign different strategies to each node for testing
+            strategies = [
+                KeepaliveStrategy.SESSION_HTTPS.value,
+                KeepaliveStrategy.SSE_STREAM.value,
+                KeepaliveStrategy.SIM_BROWSING.value,
+                KeepaliveStrategy.TCP_NULL_DRIP.value,
+                KeepaliveStrategy.UDP_DRIP.value,
+                KeepaliveStrategy.ICMP_PING6.value
+            ]
+            
+            for i, node in enumerate(self.core.nodes):
+                if node.strategy == KeepaliveStrategy.DRIFT.value:
+                    strat = strategies[i % len(strategies)]
+                    self.core.lab_manager.engine.start_strategy(node, strat, concurrency=3)
 
             dns64_ip = self.core.net_info.get('dns64_ip') if self.core.net_info else None
             
@@ -466,7 +475,7 @@ class SeekerAndBucket:
                         self.core.lab_manager.assign_strategy(node.node_id, KeepaliveStrategy.DRIFT.value)
 
             self.unique_count = len(current_unique)
-            time.sleep(5) # Faster sweeps
+            time.sleep(15) # 15s refresh as requested
 
     def get_hunting_status(self):
         return {
@@ -576,62 +585,62 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.SSE_STREAM.value:
                     target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
-                    # Use -g to disable globbing for IPv6 brackets and -m for max time
                     url = f"https://[{target_ip}]/v2/stream/recentchange"
+                    # Use curl through the proxy to keep the downstream open
                     cmd = ['curl', '-g', '-N', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', 'Host: stream.wikimedia.org', url]
-                    node_log("Starting SSE Stream...")
-                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        time.sleep(5)
-                        if proc.poll() is not None:
-                            node_log("Stream disconnected, restarting...")
-                            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    while self.running and node.strategy_gen == gen:
+                        line = proc.stdout.readline()
+                        if line:
+                            node.pulse_count += 1
+                            node.bytes_sent += len(line)
+                        if proc.poll() is not None: break
                     if proc.poll() is None: proc.terminate()
 
                 elif strategy == KeepaliveStrategy.SIM_BROWSING.value:
-                    # Target api.ipify.org primarily to pin the health check IP
-                    urls = ["api.ipify.org", "api64.ipify.org"]
-                    node_log("Starting Rapid Browsing (Targeting ipify)...")
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        host = random.choice(urls)
+                    hosts = ["api.ipify.org", "www.google.com", "www.wikipedia.org"]
+                    while self.running and node.strategy_gen == gen:
+                        host = random.choice(hosts)
                         target_ip = self._resolve_dns64(adb, host)
-                        url = f"https://[{target_ip}]/"
-                        cmd = ['curl', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', f'Host: {host}', url]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        s = socks.socksocket()
+                        s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                        s.settimeout(10)
+                        try:
+                            s.connect((target_ip, 80))
+                            req = f"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
+                            s.sendall(req)
+                            node.bytes_sent += len(req)
+                            if s.recv(1024): node.pulse_count += 1
+                        except: pass
+                        finally: s.close()
                         time.sleep(random.randint(2, 5))
 
                 elif strategy == KeepaliveStrategy.TCP_NULL_DRIP.value:
-                    target_ip = self._resolve_dns64(adb, check_host)
+                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
                     s.settimeout(10)
-                    s.connect((target_ip, 80))
-                    node_log(f"TCP Pulse active on {check_host}")
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        try:
-                            # Send a valid but minimal HTTP request instead of a null byte to avoid "Broken Pipe"
-                            s.sendall(b"HEAD / HTTP/1.1\r\nHost: api.ipify.org\r\n\r\n")
-                            time.sleep(5)
-                        except Exception as e:
-                            node_log(f"TCP Pulse error: {e}, reconnecting...")
-                            break
-                    s.close()
+                    try:
+                        s.connect((target_ip, 53))
+                        while self.running and node.strategy_gen == gen:
+                            s.sendall(b'\x00')
+                            node.bytes_sent += 1
+                            node.pulse_count += 1
+                            time.sleep(2)
+                    except: pass
+                    finally: s.close()
 
                 elif strategy == KeepaliveStrategy.UDP_DRIP.value:
-                    # UDP is often more effective at keeping NAT sessions open
                     target_ip = self._resolve_dns64(adb, "8.8.8.8")
-                    # Use a standard socket for UDP if possible, or fix the socks tuple
                     s = socks.socksocket(socket.AF_INET6, socket.SOCK_DGRAM)
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    node_log(f"UDP Drip active to {target_ip}")
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
+                    while self.running and node.strategy_gen == gen:
                         try:
-                            # Use the correct 4-tuple for IPv6 to avoid "too many values to unpack"
                             s.sendto(b'\x00', (target_ip, 53, 0, 0))
-                            time.sleep(2)
-                        except Exception as e:
-                            node_log(f"UDP Drip error: {e}, reconnecting...")
-                            break
+                            node.bytes_sent += 1
+                            node.pulse_count += 1
+                            time.sleep(1)
+                        except: break
                     s.close()
 
                 elif strategy == KeepaliveStrategy.OS_KEEPALIVE.value:
@@ -645,23 +654,24 @@ class KeepAliveEngine:
                         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
                         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 10)
                     except: pass
-                    s.connect((target_ip, 80))
-                    node_log(f"OS Keep-Alive Socket Open to {target_ip}")
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        time.sleep(5)
-                    s.close()
+                    try:
+                        s.connect((target_ip, 80))
+                        while self.running and node.strategy_gen == gen:
+                            time.sleep(5)
+                    except: pass
+                    finally: s.close()
 
                 elif strategy == KeepaliveStrategy.ICMP_PING6.value:
-                    # Native Hardware Pinning: Ping the DNS64 address of api.ipify.org
                     target_ip = self._resolve_dns64(adb, "api.ipify.org")
-                    node_log(f"Starting Native ICMPv6 Hardware Pinning to {target_ip}...")
-                    cmd = ['adb', 'shell', 'su', '-c', f"ping6 -I {node.ipv6_address} -i 1 {target_ip}"]
-                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        time.sleep(2)
-                        if proc.poll() is not None:
-                            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    proc.terminate()
+                    cmd = ['adb', 'shell', 'su', '-c', f"ping6 -I {node.ipv6_address} -i 0.5 {target_ip}"]
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    while self.running and node.strategy_gen == gen:
+                        line = proc.stdout.readline()
+                        if line:
+                            node.pulse_count += 1
+                            node.bytes_sent += 64 # ICMP packet size
+                        if proc.poll() is not None: break
+                    if proc.poll() is None: proc.terminate()
 
                 else:
                     time.sleep(5)
