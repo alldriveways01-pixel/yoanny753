@@ -157,55 +157,34 @@ class NetworkDiscovery:
     def discover(self, adb: ADBController) -> dict:
         logger.info("🔍 Discovering Cellular Network Topology...")
         
-        # 1. Find the active cellular interface
-        # Force rmnet_data1 as requested by Commander (main phone 5G, unlimited)
+        # 1. Hardcoded Interface (Commander's Orders)
         interface = "rmnet_data1"
-        
-        # Verify it exists, fallback to auto-discovery if it doesn't
-        check_iface = adb.run_shell(f"ip link show {interface}", root=True)
-        if "does not exist" in check_iface:
-            logger.warning(f"Forced interface {interface} not found, falling back to auto-discovery.")
-            route_out = adb.run_shell("ip route show table all | grep default", root=True)
-            match = re.search(r'dev\s+(rmnet[\w-]*|ccmni[\w-]*)', route_out)
-            if not match:
-                logger.error("Could not find default cellular interface!")
-                raise Exception("Cellular interface not found. Is mobile data on?")
-            interface = match.group(1)
-        
-        logger.info(f"Using interface: {interface}")
+        logger.info(f"Using strictly forced interface: {interface}")
         
         # 2. Find the routing table ID tied to this interface
         table_out = adb.run_shell(f"ip route show table all | grep default | grep {interface}", root=True)
         table_match = re.search(r'table\s+(\d+)', table_out)
         table_id = table_match.group(1) if table_match else "1015"
         
-        # 3. Extract the /64 Subnet Prefix
-        ip6_out = adb.run_shell(f"ip -6 addr show dev {interface}", root=True)
-        prefix = None
+        # 3. Extract the /64 Subnet Prefix using the EXACT bash logic from the master blueprint
+        # First attempt: exclude mngtmpaddr
+        cmd1 = f"ip -6 addr show dev {interface} | grep 'scope global' | grep -v 'mngtmpaddr' | awk '{{print $2}}' | cut -d/ -f1 | cut -d: -f1-4 | head -n 1"
+        prefix = adb.run_shell(cmd1, root=True).strip()
         
-        # Look for any global IPv6 address to extract the prefix
-        for line in ip6_out.split('\n'):
-            if 'scope global' in line:
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    ip6 = parts[1].split('/')[0]
-                    # A typical IPv6 address: 2607:fb90:a621:1234:5678:9abc:def0:1234
-                    # We want the first 4 blocks (the /64 prefix)
-                    blocks = ip6.split(':')
-                    if len(blocks) >= 4:
-                        prefix = ':'.join(blocks[:4])
-                        # If it's a valid prefix, stop looking
-                        if prefix != "fe80":
-                            break
-                        
+        # Fallback attempt: include mngtmpaddr
         if not prefix:
-            raise Exception(f"Could not extract IPv6 prefix from {interface}")
+            cmd2 = f"ip -6 addr show dev {interface} | grep 'scope global' | awk '{{print $2}}' | cut -d/ -f1 | cut -d: -f1-4 | head -n 1"
+            prefix = adb.run_shell(cmd2, root=True).strip()
+            
+        if not prefix:
+            logger.error(f"Could not extract IPv6 prefix from {interface}.")
+            prefix = "UNKNOWN"
 
         logger.info(f"✅ Topology Found -> Interface: {interface} | Table: {table_id} | Prefix: {prefix}::/64")
         return {
             'cell_interface': interface,
             'table_id': table_id,
-            'ipv6_prefix': prefix
+            'nat64_prefix': prefix
         }
 
 # ─────────────────────────────────────────────────────────────
@@ -215,9 +194,9 @@ class NodeManager:
     def deploy_exploit(self, adb: ADBController, count: int, net_info: dict) -> List[Node]:
         logger.info(f"🚀 Injecting NAT64 Exploit Script for {count} nodes...")
         
-        prefix = net_info['ipv6_prefix']
-        interface = net_info['cell_interface']
-        table_id = net_info['table_id']
+        prefix = net_info.get('nat64_prefix', 'UNKNOWN')
+        interface = net_info.get('cell_interface', 'rmnet_data0')
+        table_id = net_info.get('table_id', '1015')
         
         # We write the bash script locally, push it to the phone, and execute it as root.
         # This avoids all quoting/escaping nightmares over ADB.
