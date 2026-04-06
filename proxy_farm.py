@@ -158,12 +158,21 @@ class NetworkDiscovery:
         logger.info("🔍 Discovering Cellular Network Topology...")
         
         # 1. Find the active cellular interface
-        route_out = adb.run_shell("ip route show table all | grep default", root=True)
-        match = re.search(r'dev\s+(rmnet[\w-]*|ccmni[\w-]*)', route_out)
-        if not match:
-            logger.error("Could not find default cellular interface!")
-            raise Exception("Cellular interface not found. Is mobile data on?")
-        interface = match.group(1)
+        # Force rmnet_data1 as requested by Commander (main phone 5G, unlimited)
+        interface = "rmnet_data1"
+        
+        # Verify it exists, fallback to auto-discovery if it doesn't
+        check_iface = adb.run_shell(f"ip link show {interface}", root=True)
+        if "does not exist" in check_iface:
+            logger.warning(f"Forced interface {interface} not found, falling back to auto-discovery.")
+            route_out = adb.run_shell("ip route show table all | grep default", root=True)
+            match = re.search(r'dev\s+(rmnet[\w-]*|ccmni[\w-]*)', route_out)
+            if not match:
+                logger.error("Could not find default cellular interface!")
+                raise Exception("Cellular interface not found. Is mobile data on?")
+            interface = match.group(1)
+        
+        logger.info(f"Using interface: {interface}")
         
         # 2. Find the routing table ID tied to this interface
         table_out = adb.run_shell(f"ip route show table all | grep default | grep {interface}", root=True)
@@ -173,23 +182,21 @@ class NetworkDiscovery:
         # 3. Extract the /64 Subnet Prefix
         ip6_out = adb.run_shell(f"ip -6 addr show dev {interface}", root=True)
         prefix = None
+        
+        # Look for any global IPv6 address to extract the prefix
         for line in ip6_out.split('\n'):
-            if 'scope global' in line and 'mngtmpaddr' not in line:
+            if 'scope global' in line:
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     ip6 = parts[1].split('/')[0]
-                    prefix = ':'.join(ip6.split(':')[:4])
-                    break
-        
-        # Fallback if mngtmpaddr exclusion hides it
-        if not prefix:
-            for line in ip6_out.split('\n'):
-                if 'scope global' in line:
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        ip6 = parts[1].split('/')[0]
-                        prefix = ':'.join(ip6.split(':')[:4])
-                        break
+                    # A typical IPv6 address: 2607:fb90:a621:1234:5678:9abc:def0:1234
+                    # We want the first 4 blocks (the /64 prefix)
+                    blocks = ip6.split(':')
+                    if len(blocks) >= 4:
+                        prefix = ':'.join(blocks[:4])
+                        # If it's a valid prefix, stop looking
+                        if prefix != "fe80":
+                            break
                         
         if not prefix:
             raise Exception(f"Could not extract IPv6 prefix from {interface}")
@@ -621,7 +628,7 @@ class ProxyFarmCore:
             "monitoring_active": self.monitoring,
             "hunting_status": self.seeker.get_hunting_status() if self.seeker else {},
             "hunter_stats": self.seeker.get_hunter_stats() if self.seeker else {},
-            "lab_test_running": False,
+            "lab_test_running": len(self.lab_manager.engine.active_threads) > 0 if self.lab_manager else False,
             "timestamp": datetime.now().isoformat()
         }
 
