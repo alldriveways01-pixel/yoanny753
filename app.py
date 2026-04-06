@@ -3,9 +3,11 @@ import time
 import threading
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO
+from flask_cors import CORS
 from proxy_farm import ProxyFarmCore
 
 app = Flask(__name__)
+CORS(app)
 # Enable CORS for all origins during development
 socketio = SocketIO(app, cors_allowed_origins="*")
 
