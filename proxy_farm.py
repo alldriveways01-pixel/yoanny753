@@ -155,64 +155,59 @@ class ADBController:
 # ─────────────────────────────────────────────────────────────
 class NetworkDiscovery:
     def discover(self, adb: ADBController) -> dict:
-        logger.info("🔍 Discovering Cellular Network Topology...")
+        logger.info("🔍 Discovering Cellular Network Topology (Smart Mode)...")
         
-        # 1. Hardcoded Interface (Commander's Orders)
-        # "APN that is number one, which is the normal phone's one" -> rmnet_data0
-        interface = "rmnet_data0"
-        logger.info(f"Using strictly forced interface: {interface}")
+        # 1. Get ALL IPv6 addresses across all interfaces without root
+        ip_out = adb.run_shell("ip -6 addr")
         
-        # 2. Find the routing table ID tied to this interface
-        table_out = adb.run_shell(f"ip route show table all", root=True)
-        table_id = "1015" # Default
-        for line in table_out.split('\n'):
-            if 'default' in line and interface in line:
-                table_match = re.search(r'table\s+(\d+)', line)
-                if table_match:
-                    table_id = table_match.group(1)
-                    break
+        best_iface = None
+        best_prefix = None
+        current_iface = None
         
-        # 3. Extract the /64 Subnet Prefix safely via Python parsing
-        # We run this WITHOUT root because 'ip addr' doesn't need root, 
-        # and 'su -c' can sometimes swallow output or mess up formatting.
-        ip_out = adb.run_shell(f"ip -6 addr show dev {interface}")
-        prefix = ""
-        
-        # First attempt: exclude mngtmpaddr
+        # 2. Parse the output to find the true active cellular interface
         for line in ip_out.split('\n'):
-            if 'scope global' in line and 'mngtmpaddr' not in line:
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    ip_full = parts[1].split('/')[0]
-                    blocks = ip_full.split(':')
-                    if len(blocks) >= 4:
-                        prefix = ':'.join(blocks[:4])
-                        break
-                        
-        # Fallback attempt: include mngtmpaddr
-        if not prefix:
-            for line in ip_out.split('\n'):
-                if 'scope global' in line:
+            # Match interface name, e.g., "15: rmnet_data2@rmnet_mhi0: <..."
+            iface_match = re.match(r'^\d+:\s+([\w-]+)(?:@[\w-]+)?:', line)
+            if iface_match:
+                current_iface = iface_match.group(1)
+                continue
+                
+            # Look for global IPv6 addresses on cellular interfaces
+            if current_iface and (current_iface.startswith('rmnet') or current_iface.startswith('ccmni')):
+                if 'inet6' in line and 'scope global' in line:
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         ip_full = parts[1].split('/')[0]
                         blocks = ip_full.split(':')
                         if len(blocks) >= 4:
                             prefix = ':'.join(blocks[:4])
-                            break
+                            if prefix != "fe80":
+                                best_iface = current_iface
+                                best_prefix = prefix
+                                break # Found the active one!
+        
+        if not best_iface or not best_prefix:
+            logger.error("CRITICAL: No cellular interface with a global IPv6 prefix found!")
+            logger.error(f"--- FULL IPV6 DUMP START ---\n{ip_out}\n--- FULL IPV6 DUMP END ---")
+            return {'cell_interface': 'rmnet_data0', 'table_id': '1015', 'nat64_prefix': 'UNKNOWN'}
             
-        if not prefix:
-            # LIFE-OR-DEATH DEBUGGING: If this fails, dump ALL interfaces so we can see the truth.
-            all_ips = adb.run_shell("ip -6 addr")
-            logger.error(f"CRITICAL: Could not extract IPv6 prefix from {interface}.")
-            logger.error(f"--- FULL IPV6 DUMP START ---\n{all_ips}\n--- FULL IPV6 DUMP END ---")
-            prefix = "UNKNOWN"
+        logger.info(f"Smart Discovery selected active interface: {best_iface}")
+        
+        # 3. Find the routing table ID tied to this specific interface
+        table_out = adb.run_shell(f"ip route show table all", root=True)
+        table_id = "1015" # Default
+        for line in table_out.split('\n'):
+            if 'default' in line and best_iface in line:
+                table_match = re.search(r'table\s+(\d+)', line)
+                if table_match:
+                    table_id = table_match.group(1)
+                    break
 
-        logger.info(f"✅ Topology Found -> Interface: {interface} | Table: {table_id} | Prefix: {prefix}::/64")
+        logger.info(f"✅ Topology Found -> Interface: {best_iface} | Table: {table_id} | Prefix: {best_prefix}::/64")
         return {
-            'cell_interface': interface,
+            'cell_interface': best_iface,
             'table_id': table_id,
-            'nat64_prefix': prefix
+            'nat64_prefix': best_prefix
         }
 
 # ─────────────────────────────────────────────────────────────
