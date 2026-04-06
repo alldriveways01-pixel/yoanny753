@@ -308,7 +308,7 @@ function MainDashboard({ state, dispatch, socket }: any) {
   );
 }
 
-function KeepaliveLab({ state }: any) {
+function KeepaliveLab({ state, backendUrl, socket }: any) {
   const strategies = [
     { id: 'session_https', name: 'Session HTTPS' },
     { id: 'sse_stream', name: 'SSE Stream' },
@@ -795,7 +795,7 @@ function AppContent() {
         )}
 
         {activeTab === 'dashboard' && <MainDashboard state={state} dispatch={dispatch} socket={socket} />}
-        {activeTab === 'lab' && <KeepaliveLab state={state} />}
+        {activeTab === 'lab' && <KeepaliveLab state={state} backendUrl={backendUrl} socket={socket} />}
         {activeTab === 'analysis' && <AdvancedAnalysis />}
       </main>
     </div>
