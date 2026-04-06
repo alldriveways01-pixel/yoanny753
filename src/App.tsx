@@ -588,7 +588,7 @@ function AppContent() {
   const [socket, setSocket] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [backendUrl, setBackendUrl] = useState(`http://127.0.0.1:3001`);
+  const [backendUrl, setBackendUrl] = useState(`http://${window.location.hostname}:3001`);
   const [usePollingOnly, setUsePollingOnly] = useState(false);
   const [healthStatus, setHealthStatus] = useState<'checking' | 'ok' | 'failed' | null>(null);
   const [forceConnect, setForceConnect] = useState(false);

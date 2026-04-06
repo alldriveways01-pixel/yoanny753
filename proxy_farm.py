@@ -162,19 +162,41 @@ class NetworkDiscovery:
         logger.info(f"Using strictly forced interface: {interface}")
         
         # 2. Find the routing table ID tied to this interface
-        table_out = adb.run_shell(f"ip route show table all | grep default | grep {interface}", root=True)
-        table_match = re.search(r'table\s+(\d+)', table_out)
-        table_id = table_match.group(1) if table_match else "1015"
+        table_out = adb.run_shell(f"ip route show table all", root=True)
+        table_id = "1015" # Default
+        for line in table_out.split('\n'):
+            if 'default' in line and interface in line:
+                table_match = re.search(r'table\s+(\d+)', line)
+                if table_match:
+                    table_id = table_match.group(1)
+                    break
         
-        # 3. Extract the /64 Subnet Prefix using the EXACT bash logic from the master blueprint
+        # 3. Extract the /64 Subnet Prefix safely via Python parsing
+        ip_out = adb.run_shell(f"ip -6 addr show dev {interface}", root=True)
+        prefix = ""
+        
         # First attempt: exclude mngtmpaddr
-        cmd1 = f"ip -6 addr show dev {interface} | grep 'scope global' | grep -v 'mngtmpaddr' | awk '{{print $2}}' | cut -d/ -f1 | cut -d: -f1-4 | head -n 1"
-        prefix = adb.run_shell(cmd1, root=True).strip()
-        
+        for line in ip_out.split('\n'):
+            if 'scope global' in line and 'mngtmpaddr' not in line:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    ip_full = parts[1].split('/')[0]
+                    blocks = ip_full.split(':')
+                    if len(blocks) >= 4:
+                        prefix = ':'.join(blocks[:4])
+                        break
+                        
         # Fallback attempt: include mngtmpaddr
         if not prefix:
-            cmd2 = f"ip -6 addr show dev {interface} | grep 'scope global' | awk '{{print $2}}' | cut -d/ -f1 | cut -d: -f1-4 | head -n 1"
-            prefix = adb.run_shell(cmd2, root=True).strip()
+            for line in ip_out.split('\n'):
+                if 'scope global' in line:
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        ip_full = parts[1].split('/')[0]
+                        blocks = ip_full.split(':')
+                        if len(blocks) >= 4:
+                            prefix = ':'.join(blocks[:4])
+                            break
             
         if not prefix:
             logger.error(f"Could not extract IPv6 prefix from {interface}.")
