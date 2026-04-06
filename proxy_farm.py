@@ -481,6 +481,16 @@ class KeepAliveEngine:
         self.running = False
         self.active_threads.clear()
 
+    def _resolve_dns64(self, adb: ADBController, hostname: str) -> str:
+        """Resolves a hostname to its DNS64 IPv6 address using the phone's native DNS."""
+        out = adb.run_shell(f"ping6 -c 1 {hostname}")
+        for line in out.split('\n'):
+            if 'PING' in line:
+                match = re.search(r'\((.*?)\)', line)
+                if match:
+                    return match.group(1)
+        return hostname
+
     def _run_strategy(self, node: Node, strategy: str):
         """Executes the selected keep-alive strategy continuously."""
         import socket
@@ -488,14 +498,19 @@ class KeepAliveEngine:
         import ssl
         import random
         import subprocess
+        import re
+        
+        adb = ADBController()
         
         while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
             try:
                 if strategy == KeepaliveStrategy.SESSION_HTTPS.value:
+                    target_ip = self._resolve_dns64(adb, "www.google.com")
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.connect(("www.google.com", 443))
+                    s.connect((target_ip, 443))
                     ctx = ssl.create_default_context()
+                    # We still need the hostname for SNI
                     ss = ctx.wrap_socket(s, server_hostname="www.google.com")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         ss.sendall(b"GET / HTTP/1.1\r\nHost: www.google.com\r\nConnection: keep-alive\r\n\r\n")
@@ -504,7 +519,10 @@ class KeepAliveEngine:
                     ss.close()
 
                 elif strategy == KeepaliveStrategy.SSE_STREAM.value:
-                    cmd = ['curl', '-N', '-s', '--socks5-hostname', f'127.0.0.1:{node.external_port}', 'https://stream.wikimedia.org/v2/stream/recentchange']
+                    target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
+                    # Use the IP directly in the URL to bypass proxy-side DNS issues
+                    url = f"https://[{target_ip}]/v2/stream/recentchange"
+                    cmd = ['curl', '-N', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', 'Host: stream.wikimedia.org', url]
                     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         time.sleep(2)
@@ -513,10 +531,12 @@ class KeepAliveEngine:
                     proc.terminate()
 
                 elif strategy == KeepaliveStrategy.SIM_BROWSING.value:
-                    urls = ['https://www.google.com', 'https://www.wikipedia.org', 'https://github.com', 'https://www.reddit.com']
+                    urls = ['www.google.com', 'www.wikipedia.org', 'github.com', 'www.reddit.com']
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        url = random.choice(urls)
-                        cmd = ['curl', '-s', '--socks5-hostname', f'127.0.0.1:{node.external_port}', url]
+                        host = random.choice(urls)
+                        target_ip = self._resolve_dns64(adb, host)
+                        url = f"https://[{target_ip}]/"
+                        cmd = ['curl', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', f'Host: {host}', url]
                         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         time.sleep(random.randint(15, 45))
 
@@ -524,7 +544,8 @@ class KeepAliveEngine:
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
                     s.settimeout(10)
-                    s.connect(("8.8.8.8", 53))
+                    # Use Google's Public DNS IPv6 address
+                    s.connect(("2001:4860:4860::8888", 53))
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         s.sendall(b'\x00')
                         time.sleep(15)
@@ -539,7 +560,8 @@ class KeepAliveEngine:
                         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
                     except AttributeError:
                         pass
-                    s.connect(("8.8.8.8", 53))
+                    # Use Google's Public DNS IPv6 address
+                    s.connect(("2001:4860:4860::8888", 53))
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         time.sleep(5)
                     s.close()
