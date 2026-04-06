@@ -158,7 +158,8 @@ class NetworkDiscovery:
         logger.info("🔍 Discovering Cellular Network Topology...")
         
         # 1. Hardcoded Interface (Commander's Orders)
-        interface = "rmnet_data1"
+        # "APN that is number one, which is the normal phone's one" -> rmnet_data0
+        interface = "rmnet_data0"
         logger.info(f"Using strictly forced interface: {interface}")
         
         # 2. Find the routing table ID tied to this interface
@@ -172,7 +173,9 @@ class NetworkDiscovery:
                     break
         
         # 3. Extract the /64 Subnet Prefix safely via Python parsing
-        ip_out = adb.run_shell(f"ip -6 addr show dev {interface}", root=True)
+        # We run this WITHOUT root because 'ip addr' doesn't need root, 
+        # and 'su -c' can sometimes swallow output or mess up formatting.
+        ip_out = adb.run_shell(f"ip -6 addr show dev {interface}")
         prefix = ""
         
         # First attempt: exclude mngtmpaddr
@@ -199,7 +202,10 @@ class NetworkDiscovery:
                             break
             
         if not prefix:
-            logger.error(f"Could not extract IPv6 prefix from {interface}.")
+            # LIFE-OR-DEATH DEBUGGING: If this fails, dump ALL interfaces so we can see the truth.
+            all_ips = adb.run_shell("ip -6 addr")
+            logger.error(f"CRITICAL: Could not extract IPv6 prefix from {interface}.")
+            logger.error(f"--- FULL IPV6 DUMP START ---\n{all_ips}\n--- FULL IPV6 DUMP END ---")
             prefix = "UNKNOWN"
 
         logger.info(f"✅ Topology Found -> Interface: {interface} | Table: {table_id} | Prefix: {prefix}::/64")
