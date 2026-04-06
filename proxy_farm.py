@@ -532,15 +532,16 @@ class KeepAliveEngine:
                     ctx = ssl.create_default_context()
                     # Use api.ipify.org for SSL SNI as well
                     ss = ctx.wrap_socket(s, server_hostname="api.ipify.org")
-                    node_log("SSL Session Established to api.ipify.org")
+                    node_log("🚀 TURBO SSL SESSION ACTIVE (1s Pulse)")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         try:
+                            # Full HTTP request to keep the NAT mapping 'hot'
                             ss.sendall(b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n")
-                            ss.settimeout(5)
+                            ss.settimeout(2)
                             ss.recv(1024)
-                            time.sleep(5) # Aggressive 5s pulse
+                            time.sleep(1) # TURBO 1s pulse
                         except Exception as e:
-                            node_log(f"Session pulse error: {e}, reconnecting...")
+                            node_log(f"Turbo pulse error: {e}, reconnecting...")
                             break
                     ss.close()
 

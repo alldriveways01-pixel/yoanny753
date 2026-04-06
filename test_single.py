@@ -30,10 +30,10 @@ def main():
         print(Fore.RED + "[!] Deployment failed.")
         return
 
-    # Force the most successful strategy: SESSION_HTTPS
+    # Force the most successful strategy: SESSION_HTTPS (Now in TURBO MODE)
     node = core.nodes[0]
     strategy = KeepaliveStrategy.SESSION_HTTPS.value
-    print(Fore.BLUE + f"[*] Forcing Strategy: {Fore.MAGENTA}{strategy}")
+    print(Fore.BLUE + f"[*] Forcing {Fore.RED}TURBO{Fore.BLUE} Strategy: {Fore.MAGENTA}{strategy}")
     
     # Start the keep-alive engine for this node
     core.lab_manager.assign_strategy(node.node_id, strategy)
