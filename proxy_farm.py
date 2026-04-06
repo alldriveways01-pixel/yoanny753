@@ -74,6 +74,7 @@ class Node:
     success_rate: float = 0.0
     pulse_count: int = 0
     bytes_sent: int = 0
+    strategy_gen: int = 0
 
     def to_dict(self):
         d = self.__dict__.copy()
@@ -485,33 +486,33 @@ class SeekerAndBucket:
 # ─────────────────────────────────────────────────────────────
 class KeepAliveEngine:
     def __init__(self):
-        self.active_threads = {}
         self.running = True
         self._dns_cache = {}
 
     def start_strategy(self, node: Node, strategy: str, concurrency: int = 3):
-        """Starts the strategy with multiple concurrent threads to 'flood' the NAT mapping."""
-        self.stop_strategy(node.node_id)
+        """Starts the strategy with multiple concurrent threads using Generation Locking."""
         node.strategy = strategy
+        node.strategy_gen += 1 # Increment generation to kill old threads
         node.pulse_count = 0
         node.bytes_sent = 0
         
-        threads = []
-        for i in range(concurrency):
-            t = threading.Thread(target=self._run_strategy, args=(node, strategy, i), daemon=True)
-            threads.append(t)
-            t.start()
+        current_gen = node.strategy_gen
+        logger.info(f"🚀 Starting NUCLEAR Keep-Alive [{strategy}] on Node {node.node_id} (Gen {current_gen})")
         
-        self.active_threads[node.node_id] = threads
-        logger.info(f"Started Nuclear Keep-Alive [{strategy}] on Node {node.node_id} with {concurrency} threads")
+        for i in range(concurrency):
+            t = threading.Thread(
+                target=self._run_strategy, 
+                args=(node, strategy, i, current_gen), 
+                daemon=True
+            )
+            t.start()
 
     def stop_strategy(self, node_id: int):
-        if node_id in self.active_threads:
-            del self.active_threads[node_id]
+        # We don't need to do anything here, the threads will die when strategy_gen increments
+        pass
 
     def stop_all(self):
         self.running = False
-        self.active_threads.clear()
 
     def _resolve_dns64(self, adb: ADBController, hostname: str) -> str:
         """Resolves a hostname to its DNS64 IPv6 address using the phone's native DNS with caching."""
@@ -528,44 +529,50 @@ class KeepAliveEngine:
                     return res
         return hostname
 
-    def _run_strategy(self, node: Node, strategy: str, thread_idx: int = 0):
-        """Executes the selected keep-alive strategy continuously with high frequency."""
+    def _run_strategy(self, node: Node, strategy: str, thread_idx: int, gen: int):
+        """Executes the selected keep-alive strategy with Generation Locking and Deep Logging."""
         adb = ADBController()
-        node_log = lambda m: logger.info(f"Node {node.node_id} [T{thread_idx}][{strategy}]: {m}")
+        node_log = lambda m: logger.info(f"Node {node.node_id} [T{thread_idx}][G{gen}]: {m}")
         
-        # Target the same endpoint as the health checker to pin the "Dashboard IP"
-        check_host = "api.ipify.org"
-        
-        while self.running and threading.current_thread() in self.active_threads.get(node.node_id, []):
+        while self.running and node.strategy_gen == gen:
             try:
                 if strategy == KeepaliveStrategy.SESSION_HTTPS.value:
                     target_ip = self._resolve_dns64(adb, "api.ipify.org")
+                    
+                    node_log(f"Connecting to Proxy 127.0.0.1:{node.external_port}...")
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.settimeout(10)
-                    s.connect((target_ip, 443))
-                    ctx = ssl.create_default_context()
-                    # Use api.ipify.org for SSL SNI as well
-                    ss = ctx.wrap_socket(s, server_hostname="api.ipify.org")
-                    node_log(f"Nuclear SSL Session T{thread_idx} Active")
+                    s.settimeout(15)
                     
-                    while self.running and threading.current_thread() in self.active_threads.get(node.node_id, []):
-                        try:
-                            # Full HTTP request to keep the NAT mapping 'hot'
-                            req = b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n"
-                            ss.sendall(req)
-                            node.bytes_sent += len(req)
-                            
-                            ss.settimeout(3)
-                            resp = ss.recv(1024)
-                            if resp:
-                                node.pulse_count += 1
-                            
-                            time.sleep(1) # TURBO 1s pulse per thread
-                        except Exception as e:
-                            node_log(f"Turbo pulse error: {e}, reconnecting...")
-                            break
-                    ss.close()
+                    try:
+                        s.connect((target_ip, 443))
+                        node_log("Proxy Connection Established. Starting SSL Handshake...")
+                        
+                        ctx = ssl.create_default_context()
+                        ss = ctx.wrap_socket(s, server_hostname="api.ipify.org")
+                        node_log("Nuclear SSL Session Active. Pulsing...")
+                        
+                        while self.running and node.strategy_gen == gen:
+                            try:
+                                req = b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n"
+                                ss.sendall(req)
+                                node.bytes_sent += len(req)
+                                
+                                ss.settimeout(5)
+                                resp = ss.recv(1024)
+                                if resp:
+                                    node.pulse_count += 1
+                                
+                                time.sleep(1)
+                            except Exception as e:
+                                node_log(f"Pulse error: {e}")
+                                break
+                        ss.close()
+                    except Exception as e:
+                        node_log(f"Connection/SSL error: {e}")
+                        time.sleep(2)
+                    finally:
+                        s.close()
 
                 elif strategy == KeepaliveStrategy.SSE_STREAM.value:
                     target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
