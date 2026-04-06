@@ -41,6 +41,7 @@ class KeepaliveStrategy(Enum):
     SSE_STREAM = "sse_stream"
     SIM_BROWSING = "sim_browsing"
     TCP_NULL_DRIP = "tcp_null_drip"
+    UDP_DRIP = "udp_drip"
     OS_KEEPALIVE = "os_keepalive"
     ICMP_PING6 = "icmp_ping6"
 
@@ -322,16 +323,21 @@ class HealthChecker:
     def check_node(self, port: int, dns64_ip: str = None):
         """Uses curl via subprocess to test the SOCKS5 proxy and get the external IPv4."""
         try:
-            # If we have a DNS64 IP, use it directly to bypass Termux DNS issues
-            target_url = f"http://[{dns64_ip}]" if dns64_ip else "https://api.ipify.org"
-            host_header = "api.ipify.org"
+            # If we have a DNS64 IP, use --resolve to bypass Termux DNS issues while keeping HTTPS
+            if dns64_ip:
+                cmd = [
+                    'curl', '-s', '--max-time', '5', 
+                    '--socks5', f'127.0.0.1:{port}',
+                    '--resolve', f'api.ipify.org:443:{dns64_ip}',
+                    'https://api.ipify.org'
+                ]
+            else:
+                cmd = [
+                    'curl', '-s', '--max-time', '5', 
+                    '--socks5', f'127.0.0.1:{port}',
+                    'https://api.ipify.org'
+                ]
             
-            cmd = [
-                'curl', '-s', '--max-time', '5', 
-                '--socks5', f'127.0.0.1:{port}', # Use --socks5 instead of --socks5-hostname to pass IP directly
-                '-H', f'Host: {host_header}',
-                target_url
-            ]
             start = time.time()
             res = subprocess.run(cmd, capture_output=True, text=True)
             latency = int((time.time() - start) * 1000)
@@ -365,7 +371,7 @@ class SeekerAndBucket:
     def log(self, msg: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.logs.append(f"[{timestamp}] {msg}")
-        if len(self.logs) > 50:
+        if len(self.logs) > 100:
             self.logs.pop(0)
         logger.info(msg)
 
@@ -373,6 +379,7 @@ class SeekerAndBucket:
         self.active = True
         self.thread = threading.Thread(target=self.monitor_loop, daemon=True)
         self.thread.start()
+        self.log("Seeker & Keep-Alive Monitor Active.")
 
     def stop(self):
         self.active = False
@@ -381,11 +388,14 @@ class SeekerAndBucket:
 
     def monitor_loop(self):
         self.log("Seeker Thread Started. Harvesting IPs...")
+        from concurrent.futures import ThreadPoolExecutor
+        
         strategies = [
             KeepaliveStrategy.SESSION_HTTPS.value,
             KeepaliveStrategy.SSE_STREAM.value,
             KeepaliveStrategy.SIM_BROWSING.value,
             KeepaliveStrategy.TCP_NULL_DRIP.value,
+            KeepaliveStrategy.UDP_DRIP.value,
             KeepaliveStrategy.OS_KEEPALIVE.value,
             KeepaliveStrategy.ICMP_PING6.value
         ]
@@ -400,17 +410,20 @@ class SeekerAndBucket:
                 if node.strategy != KeepaliveStrategy.DRIFT.value and node.public_ipv4:
                     active_anchors.add(node.public_ipv4)
 
-            for node in self.core.nodes:
-                if not self.active: break
-                
-                dns64_ip = self.core.net_info.get('dns64_ip') if self.core.net_info else None
+            dns64_ip = self.core.net_info.get('dns64_ip') if self.core.net_info else None
+            
+            def check_and_update(node):
                 ip, latency = self.health_checker.check_node(node.external_port, dns64_ip)
-                self.stats['total_checks'] += 1
-                
                 node.public_ipv4 = ip
                 node.is_alive = bool(ip)
                 node.latency_ms = latency
-                
+                return node, ip
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                results = list(executor.map(check_and_update, self.core.nodes))
+
+            for node, ip in results:
+                self.stats['total_checks'] += 1
                 if ip:
                     current_unique.add(ip)
                     if ip not in self.seen_ips:
@@ -437,11 +450,7 @@ class SeekerAndBucket:
                         self.core.lab_manager.assign_strategy(node.node_id, KeepaliveStrategy.DRIFT.value)
 
             self.unique_count = len(current_unique)
-            
-            # CHANGED: Auto-Rotation has been completely disabled as per Commander's orders.
-            # The system will now stick to the /64 prefix indefinitely until manually rotated.
-            
-            time.sleep(10) # Wait before next sweep
+            time.sleep(5) # Faster sweeps
 
     def get_hunting_status(self):
         return {
@@ -463,6 +472,7 @@ class KeepAliveEngine:
     def __init__(self):
         self.active_threads = {}
         self.running = True
+        self._dns_cache = {}
 
     def start_strategy(self, node: Node, strategy: str):
         self.stop_strategy(node.node_id)
@@ -482,17 +492,22 @@ class KeepAliveEngine:
         self.active_threads.clear()
 
     def _resolve_dns64(self, adb: ADBController, hostname: str) -> str:
-        """Resolves a hostname to its DNS64 IPv6 address using the phone's native DNS."""
+        """Resolves a hostname to its DNS64 IPv6 address using the phone's native DNS with caching."""
+        if hostname in self._dns_cache:
+            return self._dns_cache[hostname]
+            
         out = adb.run_shell(f"ping6 -c 1 {hostname}")
         for line in out.split('\n'):
             if 'PING' in line:
                 match = re.search(r'\((.*?)\)', line)
                 if match:
-                    return match.group(1)
+                    res = match.group(1)
+                    self._dns_cache[hostname] = res
+                    return res
         return hostname
 
     def _run_strategy(self, node: Node, strategy: str):
-        """Executes the selected keep-alive strategy continuously."""
+        """Executes the selected keep-alive strategy continuously with high frequency."""
         import socket
         import socks
         import ssl
@@ -501,73 +516,109 @@ class KeepAliveEngine:
         import re
         
         adb = ADBController()
+        node_log = lambda m: logger.info(f"Node {node.node_id} [{strategy}]: {m}")
+        
+        # Target the same endpoint as the health checker to pin the "Dashboard IP"
+        check_host = "api.ipify.org"
         
         while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
             try:
                 if strategy == KeepaliveStrategy.SESSION_HTTPS.value:
-                    target_ip = self._resolve_dns64(adb, "www.google.com")
+                    target_ip = self._resolve_dns64(adb, "api.ipify.org")
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                    s.settimeout(10)
                     s.connect((target_ip, 443))
                     ctx = ssl.create_default_context()
-                    # We still need the hostname for SNI
-                    ss = ctx.wrap_socket(s, server_hostname="www.google.com")
+                    # Use api.ipify.org for SSL SNI as well
+                    ss = ctx.wrap_socket(s, server_hostname="api.ipify.org")
+                    node_log("SSL Session Established to api.ipify.org")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        ss.sendall(b"GET / HTTP/1.1\r\nHost: www.google.com\r\nConnection: keep-alive\r\n\r\n")
-                        ss.recv(4096)
-                        time.sleep(30)
+                        try:
+                            ss.sendall(b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n")
+                            ss.settimeout(5)
+                            ss.recv(1024)
+                            time.sleep(5) # Aggressive 5s pulse
+                        except Exception as e:
+                            node_log(f"Session pulse error: {e}, reconnecting...")
+                            break
                     ss.close()
 
                 elif strategy == KeepaliveStrategy.SSE_STREAM.value:
                     target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
-                    # Use the IP directly in the URL to bypass proxy-side DNS issues
                     url = f"https://[{target_ip}]/v2/stream/recentchange"
+                    # Persistent curl stream
                     cmd = ['curl', '-N', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', 'Host: stream.wikimedia.org', url]
+                    node_log("Starting SSE Stream...")
                     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         time.sleep(2)
                         if proc.poll() is not None:
+                            node_log("Stream disconnected, restarting...")
                             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     proc.terminate()
 
                 elif strategy == KeepaliveStrategy.SIM_BROWSING.value:
-                    urls = ['www.google.com', 'www.wikipedia.org', 'github.com', 'www.reddit.com']
+                    # Target api.ipify.org primarily to pin the health check IP
+                    urls = ["api.ipify.org", "api64.ipify.org"]
+                    node_log("Starting Rapid Browsing (Targeting ipify)...")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         host = random.choice(urls)
                         target_ip = self._resolve_dns64(adb, host)
                         url = f"https://[{target_ip}]/"
                         cmd = ['curl', '-s', '--socks5', f'127.0.0.1:{node.external_port}', '-H', f'Host: {host}', url]
                         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        time.sleep(random.randint(15, 45))
+                        time.sleep(random.randint(2, 5))
 
                 elif strategy == KeepaliveStrategy.TCP_NULL_DRIP.value:
+                    target_ip = self._resolve_dns64(adb, check_host)
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.settimeout(10)
-                    # Use Google's Public DNS IPv6 address
-                    s.connect(("2001:4860:4860::8888", 53))
+                    s.settimeout(5)
+                    s.connect((target_ip, 80))
+                    node_log(f"TCP Drip active on {check_host}")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
-                        s.sendall(b'\x00')
-                        time.sleep(15)
+                        try:
+                            s.sendall(b'\x00')
+                            time.sleep(3)
+                        except Exception as e:
+                            node_log(f"TCP Drip error: {e}, reconnecting...")
+                            break
+                    s.close()
+
+                elif strategy == KeepaliveStrategy.UDP_DRIP.value:
+                    # UDP is often more effective at keeping NAT sessions open
+                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    s = socks.socksocket(socket.AF_INET6, socket.SOCK_DGRAM)
+                    s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                    node_log(f"UDP Drip active to {target_ip}")
+                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
+                        s.sendto(b'\x00', (target_ip, 53))
+                        time.sleep(2)
                     s.close()
 
                 elif strategy == KeepaliveStrategy.OS_KEEPALIVE.value:
+                    # Target api.ipify.org via Proxy with OS-level keep-alives
+                    target_ip = self._resolve_dns64(adb, "api.ipify.org")
                     s = socks.socksocket()
                     s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                     try:
-                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
-                    except AttributeError:
-                        pass
-                    # Use Google's Public DNS IPv6 address
-                    s.connect(("2001:4860:4860::8888", 53))
+                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 10)
+                    except: pass
+                    s.connect((target_ip, 80))
+                    node_log(f"OS Keep-Alive Socket Open to {target_ip}")
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         time.sleep(5)
                     s.close()
 
                 elif strategy == KeepaliveStrategy.ICMP_PING6.value:
-                    cmd = ['adb', 'shell', 'ping6', '-I', node.ipv6_address, '-i', '15', '2001:4860:4860::8888']
+                    # Native Hardware Pinning: Ping the DNS64 address of api.ipify.org
+                    target_ip = self._resolve_dns64(adb, "api.ipify.org")
+                    node_log(f"Starting Native ICMPv6 Hardware Pinning to {target_ip}...")
+                    cmd = ['adb', 'shell', 'su', '-c', f"ping6 -I {node.ipv6_address} -i 1 {target_ip}"]
                     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
                         time.sleep(2)
@@ -578,6 +629,7 @@ class KeepAliveEngine:
                 else:
                     time.sleep(5)
             except Exception as e:
+                node_log(f"Strategy Error: {str(e)}")
                 time.sleep(5)
 
 class KeepAliveLabManager:
