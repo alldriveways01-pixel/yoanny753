@@ -12,10 +12,23 @@ import logging
 import sqlite3
 import threading
 import subprocess
+import sys
+import socket
+import ssl
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
+
+# Third-party imports
+try:
+    import socks
+    import requests
+except ImportError as e:
+    print(f"CRITICAL ERROR: Missing dependency: {e}")
+    print("Please run: pip install PySocks requests")
+    sys.exit(1)
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING SETUP
@@ -517,13 +530,6 @@ class KeepAliveEngine:
 
     def _run_strategy(self, node: Node, strategy: str, thread_idx: int = 0):
         """Executes the selected keep-alive strategy continuously with high frequency."""
-        import socket
-        import socks
-        import ssl
-        import random
-        import subprocess
-        import re
-        
         adb = ADBController()
         node_log = lambda m: logger.info(f"Node {node.node_id} [T{thread_idx}][{strategy}]: {m}")
         
