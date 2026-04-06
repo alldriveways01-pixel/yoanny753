@@ -194,20 +194,42 @@ class NetworkDiscovery:
         logger.info(f"Smart Discovery selected active interface: {best_iface}")
         
         # 3. Find the routing table ID tied to this specific interface
-        table_out = adb.run_shell(f"ip route show table all", root=True)
+        # We MUST check IPv6 routes because the interface might be IPv6-only
+        table_out = adb.run_shell(f"ip -6 route show table all", root=True)
         table_id = "1015" # Default
+        current_table = "1015"
         for line in table_out.split('\n'):
+            # Handle "table 1015:" format
+            if line.startswith('table '):
+                current_table = line.split()[1].replace(':', '')
+            
             if 'default' in line and best_iface in line:
+                # Handle inline "table 1015" format
                 table_match = re.search(r'table\s+(\d+)', line)
                 if table_match:
                     table_id = table_match.group(1)
+                else:
+                    table_id = current_table
+                break
+
+        # 4. Resolve api.ipify.org using the phone's DNS to get the DNS64 synthesized IPv6 address
+        # This is critical because Termux's microsocks might use 8.8.8.8 and fail to resolve IPv6
+        ping_out = adb.run_shell("ping6 -c 1 api.ipify.org")
+        dns64_ip = None
+        for line in ping_out.split('\n'):
+            if 'PING' in line:
+                # PING api.ipify.org(64:ff9b::...) 56 data bytes
+                match = re.search(r'\((.*?)\)', line)
+                if match:
+                    dns64_ip = match.group(1)
                     break
 
-        logger.info(f"✅ Topology Found -> Interface: {best_iface} | Table: {table_id} | Prefix: {best_prefix}::/64")
+        logger.info(f"✅ Topology Found -> Interface: {best_iface} | Table: {table_id} | Prefix: {best_prefix}::/64 | DNS64: {dns64_ip}")
         return {
             'cell_interface': best_iface,
             'table_id': table_id,
-            'nat64_prefix': best_prefix
+            'nat64_prefix': best_prefix,
+            'dns64_ip': dns64_ip
         }
 
 # ─────────────────────────────────────────────────────────────
@@ -253,8 +275,8 @@ for i in $(seq 1 {count}); do
     # Masquerade
     iptables -t nat -I POSTROUTING 1 -s $VIP4/32 -o {interface} -j MASQUERADE
 
-    # Bind Proxy Engine
-    /data/data/com.termux/files/usr/bin/microsocks -i 127.0.0.1 -p $PORT -b $VIP6 >/dev/null 2>&1 &
+    # Bind Proxy Engine (with logging for debugging)
+    nohup /data/data/com.termux/files/usr/bin/microsocks -i 127.0.0.1 -p $PORT -b $VIP6 > /data/local/tmp/microsocks_$PORT.log 2>&1 &
 done
 echo "EXPLOIT DEPLOYED"
 """
@@ -297,13 +319,18 @@ echo "EXPLOIT DEPLOYED"
 # HEALTH CHECKER & SEEKER (The Harvester)
 # ─────────────────────────────────────────────────────────────
 class HealthChecker:
-    def check_node(self, port: int):
+    def check_node(self, port: int, dns64_ip: str = None):
         """Uses curl via subprocess to test the SOCKS5 proxy and get the external IPv4."""
         try:
+            # If we have a DNS64 IP, use it directly to bypass Termux DNS issues
+            target_url = f"http://[{dns64_ip}]" if dns64_ip else "https://api.ipify.org"
+            host_header = "api.ipify.org"
+            
             cmd = [
                 'curl', '-s', '--max-time', '5', 
-                '--socks5-hostname', f'127.0.0.1:{port}', 
-                'https://api.ipify.org'
+                '--socks5', f'127.0.0.1:{port}', # Use --socks5 instead of --socks5-hostname to pass IP directly
+                '-H', f'Host: {host_header}',
+                target_url
             ]
             start = time.time()
             res = subprocess.run(cmd, capture_output=True, text=True)
@@ -313,6 +340,12 @@ class HealthChecker:
             # Validate it's a real IPv4 address
             if res.returncode == 0 and re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
                 return ip, latency
+                
+            # If it failed, let's grab the microsocks log for debugging
+            log_out = subprocess.run(['adb', 'shell', 'su', '-c', f'cat /data/local/tmp/microsocks_{port}.log'], capture_output=True, text=True)
+            if log_out.stdout.strip():
+                logger.error(f"Node {port} failed. Microsocks log: {log_out.stdout.strip()}")
+                
             return None, 0
         except Exception as e:
             return None, 0
@@ -370,7 +403,8 @@ class SeekerAndBucket:
             for node in self.core.nodes:
                 if not self.active: break
                 
-                ip, latency = self.health_checker.check_node(node.external_port)
+                dns64_ip = self.core.net_info.get('dns64_ip') if self.core.net_info else None
+                ip, latency = self.health_checker.check_node(node.external_port, dns64_ip)
                 self.stats['total_checks'] += 1
                 
                 node.public_ipv4 = ip
