@@ -59,6 +59,8 @@ class Node:
     strategy: str = KeepaliveStrategy.DRIFT.value
     latency_ms: int = 0
     success_rate: float = 0.0
+    pulse_count: int = 0
+    bytes_sent: int = 0
 
     def to_dict(self):
         d = self.__dict__.copy()
@@ -474,17 +476,24 @@ class KeepAliveEngine:
         self.running = True
         self._dns_cache = {}
 
-    def start_strategy(self, node: Node, strategy: str):
+    def start_strategy(self, node: Node, strategy: str, concurrency: int = 3):
+        """Starts the strategy with multiple concurrent threads to 'flood' the NAT mapping."""
         self.stop_strategy(node.node_id)
         node.strategy = strategy
-        t = threading.Thread(target=self._run_strategy, args=(node, strategy), daemon=True)
-        self.active_threads[node.node_id] = t
-        t.start()
-        logger.info(f"Started Keep-Alive Strategy [{strategy}] on Node {node.node_id}")
+        node.pulse_count = 0
+        node.bytes_sent = 0
+        
+        threads = []
+        for i in range(concurrency):
+            t = threading.Thread(target=self._run_strategy, args=(node, strategy, i), daemon=True)
+            threads.append(t)
+            t.start()
+        
+        self.active_threads[node.node_id] = threads
+        logger.info(f"Started Nuclear Keep-Alive [{strategy}] on Node {node.node_id} with {concurrency} threads")
 
     def stop_strategy(self, node_id: int):
         if node_id in self.active_threads:
-            # The thread will exit on its next loop when it sees it's no longer the active strategy
             del self.active_threads[node_id]
 
     def stop_all(self):
@@ -506,7 +515,7 @@ class KeepAliveEngine:
                     return res
         return hostname
 
-    def _run_strategy(self, node: Node, strategy: str):
+    def _run_strategy(self, node: Node, strategy: str, thread_idx: int = 0):
         """Executes the selected keep-alive strategy continuously with high frequency."""
         import socket
         import socks
@@ -516,12 +525,12 @@ class KeepAliveEngine:
         import re
         
         adb = ADBController()
-        node_log = lambda m: logger.info(f"Node {node.node_id} [{strategy}]: {m}")
+        node_log = lambda m: logger.info(f"Node {node.node_id} [T{thread_idx}][{strategy}]: {m}")
         
         # Target the same endpoint as the health checker to pin the "Dashboard IP"
         check_host = "api.ipify.org"
         
-        while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
+        while self.running and threading.current_thread() in self.active_threads.get(node.node_id, []):
             try:
                 if strategy == KeepaliveStrategy.SESSION_HTTPS.value:
                     target_ip = self._resolve_dns64(adb, "api.ipify.org")
@@ -532,14 +541,21 @@ class KeepAliveEngine:
                     ctx = ssl.create_default_context()
                     # Use api.ipify.org for SSL SNI as well
                     ss = ctx.wrap_socket(s, server_hostname="api.ipify.org")
-                    node_log("🚀 TURBO SSL SESSION ACTIVE (1s Pulse)")
-                    while self.running and self.active_threads.get(node.node_id) == threading.current_thread():
+                    node_log(f"Nuclear SSL Session T{thread_idx} Active")
+                    
+                    while self.running and threading.current_thread() in self.active_threads.get(node.node_id, []):
                         try:
                             # Full HTTP request to keep the NAT mapping 'hot'
-                            ss.sendall(b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n")
-                            ss.settimeout(2)
-                            ss.recv(1024)
-                            time.sleep(1) # TURBO 1s pulse
+                            req = b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n"
+                            ss.sendall(req)
+                            node.bytes_sent += len(req)
+                            
+                            ss.settimeout(3)
+                            resp = ss.recv(1024)
+                            if resp:
+                                node.pulse_count += 1
+                            
+                            time.sleep(1) # TURBO 1s pulse per thread
                         except Exception as e:
                             node_log(f"Turbo pulse error: {e}, reconnecting...")
                             break

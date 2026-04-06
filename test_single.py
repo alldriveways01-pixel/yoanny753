@@ -30,15 +30,15 @@ def main():
         print(Fore.RED + "[!] Deployment failed.")
         return
 
-    # Force the most successful strategy: SESSION_HTTPS (Now in TURBO MODE)
+    # Force the most successful strategy: SESSION_HTTPS (Now in NUCLEAR MODE)
     node = core.nodes[0]
     strategy = KeepaliveStrategy.SESSION_HTTPS.value
-    print(Fore.BLUE + f"[*] Forcing {Fore.RED}TURBO{Fore.BLUE} Strategy: {Fore.MAGENTA}{strategy}")
+    print(Fore.BLUE + f"[*] Forcing {Fore.RED}NUCLEAR{Fore.BLUE} Strategy: {Fore.MAGENTA}{strategy} (3 Threads)")
     
-    # Start the keep-alive engine for this node
-    core.lab_manager.assign_strategy(node.node_id, strategy)
+    # Start the keep-alive engine for this node with 3 concurrent threads
+    core.lab_manager.engine.start_strategy(node, strategy, concurrency=3)
     
-    print(Fore.GREEN + "[+] Sniper Node Active. Monitoring every 30 seconds...")
+    print(Fore.GREEN + "[+] Sniper Node Active. Monitoring every 15 seconds...")
     print(Fore.YELLOW + "[!] Press Ctrl+C to stop.")
     print("-" * 80)
     
@@ -55,6 +55,10 @@ def main():
             mins, secs = divmod(elapsed, 60)
             timer_str = f"{mins:02d}:{secs:02d}"
             
+            # Traffic Accounting
+            pulses = node.pulse_count
+            kb_sent = node.bytes_sent / 1024
+            
             if ip:
                 if not start_ip:
                     start_ip = ip
@@ -69,12 +73,13 @@ def main():
                     # Update start_ip to the new one to track the next rotation
                     start_ip = ip
                 
-                print(f"[{time.strftime('%H:%M:%S')}] [{timer_str}] IP: {ip:<15} | Latency: {latency:>3}ms | Status: {status_color}{status_text}")
+                traffic_info = f"Pulses: {Fore.CYAN}{pulses:<4}{Fore.WHITE} | Sent: {Fore.CYAN}{kb_sent:.1f}KB"
+                print(f"[{time.strftime('%H:%M:%S')}] [{timer_str}] IP: {ip:<15} | {traffic_info} | Status: {status_color}{status_text}")
             else:
                 print(Fore.RED + f"[{time.strftime('%H:%M:%S')}] [{timer_str}] Node 1 ► CONNECTION FAILED")
             
-            # Sleep for exactly 30 seconds as ordered
-            time.sleep(30)
+            # Sleep for exactly 15 seconds as ordered
+            time.sleep(15)
             
     except KeyboardInterrupt:
         print(Fore.YELLOW + "\n[!] Stopping Sniper Test...")
