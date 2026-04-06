@@ -55,7 +55,7 @@ def main():
         return
 
     print(Fore.BLUE + f"[*] Deploying {core.node_count} nodes with NAT64 Exploit...")
-    if not core.deploy_nodes(node_count=6):
+    if not core.deploy_nodes(node_count=10):
         print(Fore.RED + "[!] Deployment failed. Check logs for details.")
         return
 

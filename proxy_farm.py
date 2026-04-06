@@ -57,6 +57,15 @@ class KeepaliveStrategy(Enum):
     UDP_DRIP = "udp_drip"
     OS_KEEPALIVE = "os_keepalive"
     ICMP_PING6 = "icmp_ping6"
+    # New Elite Strategies
+    STUN_BINDING = "stun_binding"
+    DNS_TUNNEL = "dns_tunnel"
+    QUIC_STREAM = "quic_stream"
+    WEBSOCKET_PIN = "websocket_pin"
+    TLS_RESUME = "tls_resume"
+    MQTT_PING = "mqtt_ping"
+    NTP_PULSE = "ntp_pulse"
+    VOIP_SIM = "voip_sim"
 
 @dataclass
 class Node:
@@ -413,13 +422,18 @@ class SeekerAndBucket:
             active_anchors = set() # Track IPs already anchored in this sweep
             
             # Battle Royale: Assign different strategies to each node for testing
+            # We prioritize the "Winners" and fill with the 8 new "Elite" strategies
             strategies = [
-                KeepaliveStrategy.SESSION_HTTPS.value,
-                KeepaliveStrategy.SSE_STREAM.value,
-                KeepaliveStrategy.SIM_BROWSING.value,
-                KeepaliveStrategy.TCP_NULL_DRIP.value,
-                KeepaliveStrategy.UDP_DRIP.value,
-                KeepaliveStrategy.ICMP_PING6.value
+                KeepaliveStrategy.SESSION_HTTPS.value, # Winner 1
+                KeepaliveStrategy.ICMP_PING6.value,    # Winner 2
+                KeepaliveStrategy.STUN_BINDING.value,  # Elite 1
+                KeepaliveStrategy.DNS_TUNNEL.value,    # Elite 2
+                KeepaliveStrategy.QUIC_STREAM.value,   # Elite 3
+                KeepaliveStrategy.WEBSOCKET_PIN.value, # Elite 4
+                KeepaliveStrategy.TLS_RESUME.value,    # Elite 5
+                KeepaliveStrategy.MQTT_PING.value,     # Elite 6
+                KeepaliveStrategy.NTP_PULSE.value,     # Elite 7
+                KeepaliveStrategy.VOIP_SIM.value       # Elite 8
             ]
             
             # 1. Ensure all nodes have a strategy (Battle Royale)
@@ -686,6 +700,148 @@ class KeepAliveEngine:
                         if proc.poll() is not None: break
                     if proc.poll() is None: proc.terminate()
 
+                elif strategy == KeepaliveStrategy.STUN_BINDING.value:
+                    # STUN is the NAT-pinning king
+                    target_ip = self._resolve_dns64(adb, "stun.l.google.com")
+                    while self.running and node.strategy_gen == gen:
+                        # Send a STUN Binding Request (hex encoded)
+                        # 00 01 (Binding Request) 00 00 (Length) ...
+                        stun_req = b'\x00\x01\x00\x00' + os.urandom(16)
+                        cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
+                        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        try:
+                            proc.stdin.write(stun_req)
+                            proc.stdin.flush()
+                            node.pulse_count += 1
+                            node.bytes_sent += len(stun_req)
+                        except: pass
+                        time.sleep(2)
+                        proc.terminate()
+
+                elif strategy == KeepaliveStrategy.DNS_TUNNEL.value:
+                    # DNS queries are often prioritized by carriers
+                    while self.running and node.strategy_gen == gen:
+                        rand_sub = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=8))
+                        target = f"{rand_sub}.google.com"
+                        # Use dig through proxy if possible, or just socket resolution
+                        try:
+                            # We use a simple socket connect to port 53 to simulate a query
+                            s = socks.socksocket()
+                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                            s.settimeout(5)
+                            s.connect(("8.8.8.8", 53))
+                            s.sendall(os.urandom(32)) # Random DNS-like payload
+                            node.pulse_count += 1
+                            node.bytes_sent += 32
+                            s.close()
+                        except: pass
+                        time.sleep(3)
+
+                elif strategy == KeepaliveStrategy.QUIC_STREAM.value:
+                    # Simulate HTTP/3 UDP traffic
+                    target_ip = self._resolve_dns64(adb, "www.google.com")
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            for _ in range(10):
+                                if not self.running or node.strategy_gen != gen: break
+                                proc.stdin.write(os.urandom(128))
+                                proc.stdin.flush()
+                                node.pulse_count += 1
+                                node.bytes_sent += 128
+                                time.sleep(0.5)
+                            proc.terminate()
+                        except: pass
+                        time.sleep(2)
+
+                elif strategy == KeepaliveStrategy.WEBSOCKET_PIN.value:
+                    # Long-lived TCP connection with frequent small frames
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            s = socks.socksocket()
+                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                            s.settimeout(10)
+                            s.connect(("echo.websocket.org", 80))
+                            # Send a mock WS upgrade
+                            s.sendall(b"GET / HTTP/1.1\r\nHost: echo.websocket.org\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+                            while self.running and node.strategy_gen == gen:
+                                s.sendall(b'\x81\x01\x00') # WS Ping frame
+                                node.pulse_count += 1
+                                node.bytes_sent += 3
+                                time.sleep(5)
+                        except: break
+                        finally: s.close()
+
+                elif strategy == KeepaliveStrategy.TLS_RESUME.value:
+                    # Rapid TLS handshakes
+                    hosts = ["www.google.com", "www.cloudflare.com", "www.facebook.com"]
+                    while self.running and node.strategy_gen == gen:
+                        host = random.choice(hosts)
+                        try:
+                            s = socks.socksocket()
+                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                            s.settimeout(5)
+                            s.connect((host, 443))
+                            ctx = ssl.create_default_context()
+                            with ctx.wrap_socket(s, server_hostname=host) as ss:
+                                node.pulse_count += 1
+                                node.bytes_sent += 512 # Handshake size approx
+                            s.close()
+                        except: pass
+                        time.sleep(random.randint(2, 5))
+
+                elif strategy == KeepaliveStrategy.MQTT_PING.value:
+                    # IoT style pings
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            s = socks.socksocket()
+                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                            s.settimeout(10)
+                            s.connect(("broker.hivemq.com", 1883))
+                            # MQTT Connect
+                            s.sendall(b'\x10\x0c\x00\x04MQTT\x04\x02\x00\x3c\x00\x00')
+                            while self.running and node.strategy_gen == gen:
+                                s.sendall(b'\xc0\x00') # MQTT PINGREQ
+                                node.pulse_count += 1
+                                node.bytes_sent += 2
+                                time.sleep(10)
+                        except: break
+                        finally: s.close()
+
+                elif strategy == KeepaliveStrategy.NTP_PULSE.value:
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            # NTP Request packet
+                            ntp_req = b'\x1b' + 47 * b'\0'
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', 'pool.ntp.org', '123']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            proc.stdin.write(ntp_req)
+                            proc.stdin.flush()
+                            node.pulse_count += 1
+                            node.bytes_sent += len(ntp_req)
+                            time.sleep(5)
+                            proc.terminate()
+                        except: pass
+
+                elif strategy == KeepaliveStrategy.VOIP_SIM.value:
+                    # Simulating a constant stream of RTP packets
+                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            for _ in range(50):
+                                if not self.running or node.strategy_gen != gen: break
+                                proc.stdin.write(os.urandom(160)) # 20ms of G.711 audio
+                                proc.stdin.flush()
+                                node.pulse_count += 1
+                                node.bytes_sent += 160
+                                time.sleep(0.02) # 20ms interval
+                            proc.terminate()
+                        except: pass
+                        time.sleep(1)
+
                 else:
                     time.sleep(5)
             except Exception as e:
@@ -721,7 +877,7 @@ class ProxyFarmCore:
         self.monitoring = False
         self.auto_rotate = True
         self.auto_anchor = True
-        self.node_count = 6  # CHANGED: Default to 6 nodes to test all strategies
+        self.node_count = 10  # EXPANDED: 10 nodes for the ultimate test
         
     def initialize(self):
         # Verify ADB connection
@@ -731,7 +887,7 @@ class ProxyFarmCore:
             return False
         return True
         
-    def deploy_nodes(self, node_count=6, target_unique=None): # CHANGED: Default to 6
+    def deploy_nodes(self, node_count=10, target_unique=None): # EXPANDED: Default to 10
         self.node_count = node_count
         try:
             self.net_info = self.network_discovery.discover(self.adb)
