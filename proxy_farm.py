@@ -544,10 +544,10 @@ class KeepAliveEngine:
             try:
                 if strategy == KeepaliveStrategy.NAT_T_KEEPALIVE.value:
                     # Node 1: IPsec NAT-T Mimic (UDP 4500)
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
                         try:
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '4500']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '4500']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -566,7 +566,7 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.IKEV2_KEEPALIVE.value:
                     # Node 2: IKEv2 Keepalive (UDP 500)
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
                         try:
                             # Construct 28-byte IKEv2 INFORMATIONAL header
@@ -574,7 +574,7 @@ class KeepAliveEngine:
                             rspi = b'\x00' * 8
                             # struct: ispi(8), rspi(8), next(1), ver(1), exch(1), flags(1), msgid(4), len(4)
                             header = ispi + rspi + struct.pack('!BBBBII', 0, 0x20, 37, 0, 0, 28)
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '500']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '500']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -593,13 +593,13 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.WIREGUARD_HEARTBEAT.value:
                     # Node 3: WireGuard Silent Heartbeat (UDP 51820)
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
                         try:
                             # WireGuard Handshake Initiation (Type 1) - 148 bytes
                             sender_idx = os.urandom(4)
                             packet = b'\x01\x00\x00\x00' + sender_idx + os.urandom(140)
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '51820']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '51820']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -618,7 +618,7 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.SIP_GHOST.value:
                     # Node 4: SIP REGISTER Ghost Call (UDP 5060)
-                    target_ip = self._resolve_dns64(adb, "sip.linphone.org")
+                    target_ip = "sip.linphone.org"
                     while self.running and node.strategy_gen == gen:
                         try:
                             sip_msg = (
@@ -630,7 +630,7 @@ class KeepAliveEngine:
                                 "CSeq: 1 OPTIONS\r\n"
                                 "Content-Length: 0\r\n\r\n"
                             ).encode()
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -649,13 +649,15 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.STUN_BINDING.value:
                     # Node 5: STUN Binding (UDP 19302)
-                    target_ip = self._resolve_dns64(adb, "stun.l.google.com")
+                    target_ip = "stun.l.google.com"
                     while self.running and node.strategy_gen == gen:
                         try:
                             # Send a STUN Binding Request (Hex encoded)
                             # 00 01 (Binding Request), 00 00 (Length), Magic Cookie + Transaction ID
                             stun_req = b'\x00\x01\x00\x00' + os.urandom(16)
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
+                            # Removed -u to force TCP. microsocks doesn't support UDP Associate.
+                            # TCP SYN retries keep the NAT state alive.
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -674,7 +676,7 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.FCM_LONG_POLL.value:
                     # Node 6: FCM / APNs Long-Poll Mimic (TCP 5228)
-                    target_ip = self._resolve_dns64(adb, "mtalk.google.com")
+                    target_ip = "mtalk.google.com"
                     while self.running and node.strategy_gen == gen:
                         try:
                             s = socks.socksocket()
@@ -694,12 +696,12 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.DTLS_SIM.value:
                     # Node 7: WebRTC DTLS Simulation (UDP 443)
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
                         try:
                             # Minimal DTLS ClientHello (simplified)
                             dtls_hello = b'\x16\xfe\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40' + os.urandom(64)
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -718,12 +720,12 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.OPENVPN_PING.value:
                     # Node 8: OpenVPN TLS-Auth Ping (UDP 1194)
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
                         try:
                             # P_CONTROL_HARD_RESET_CLIENT_V2 (opcode 0x38)
                             packet = b'\x38' + os.urandom(8) + struct.pack('!I', int(time.time()))
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '1194']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '1194']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -742,12 +744,12 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.COAP_OBSERVE.value:
                     # Node 9: CoAP Observe (UDP 5683)
-                    target_ip = self._resolve_dns64(adb, "californium.eclipseprojects.io")
+                    target_ip = "californium.eclipseprojects.io"
                     while self.running and node.strategy_gen == gen:
                         try:
                             # CoAP GET with Observe option
                             header = b'\x50\x01\x00\x01\x60'
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5683']
+                            cmd = ['nc', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5683']
                             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
@@ -766,7 +768,7 @@ class KeepAliveEngine:
 
                 elif strategy == KeepaliveStrategy.HTTP2_PING.value:
                     # Node 10: HTTP/2 Multiplexed PING (TCP 443)
-                    target_ip = self._resolve_dns64(adb, "www.google.com")
+                    target_ip = "www.google.com"
                     while self.running and node.strategy_gen == gen:
                         try:
                             s = socks.socksocket()
