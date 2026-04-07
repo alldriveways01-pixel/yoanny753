@@ -418,16 +418,7 @@ class SeekerAndBucket:
             
             # Battle Royale: Assign the "Holy Grail" 10 strategies
             strategies = [
-                KeepaliveStrategy.NAT_T_KEEPALIVE.value,
-                KeepaliveStrategy.IKEV2_KEEPALIVE.value,
-                KeepaliveStrategy.WIREGUARD_HEARTBEAT.value,
-                KeepaliveStrategy.SIP_GHOST.value,
-                KeepaliveStrategy.STUN_BINDING.value,
-                KeepaliveStrategy.FCM_LONG_POLL.value,
-                KeepaliveStrategy.DTLS_SIM.value,
-                KeepaliveStrategy.OPENVPN_PING.value,
-                KeepaliveStrategy.COAP_OBSERVE.value,
-                KeepaliveStrategy.HTTP2_PING.value
+                KeepaliveStrategy.STUN_BINDING.value
             ]
             
             # 1. Ensure all nodes have a strategy (Battle Royale)
@@ -621,14 +612,21 @@ class KeepAliveEngine:
                     target_ip = self._resolve_dns64(adb, "stun.l.google.com")
                     while self.running and node.strategy_gen == gen:
                         try:
-                            # 20-byte STUN Binding Request
-                            header = struct.pack('!HHI', 0x0001, 0x0000, 0x2112A442) + os.urandom(12)
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
-                            subprocess.run(cmd, input=header, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(header) if isinstance(header, bytes) else 1
-                        except: pass
-                        time.sleep(15)
+                            s = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
+                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
+                            s.settimeout(10)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                # 20-byte STUN Binding Request
+                                header = struct.pack('!HHI', 0x0001, 0x0000, 0x2112A442) + os.urandom(12)
+                                s.sendto(header, (target_ip, 19302))
+                                node.pulse_count += 1
+                                node.bytes_sent += len(header)
+                                time.sleep(15)
+                        except: time.sleep(5)
+                        finally:
+                            try: s.close()
+                            except: pass
 
                 elif strategy == KeepaliveStrategy.FCM_LONG_POLL.value:
                     # Node 6: FCM / APNs Long-Poll Mimic (TCP 5228)
