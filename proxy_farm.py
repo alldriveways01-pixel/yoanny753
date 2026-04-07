@@ -547,12 +547,22 @@ class KeepAliveEngine:
                     target_ip = self._resolve_dns64(adb, "8.8.8.8")
                     while self.running and node.strategy_gen == gen:
                         try:
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '4500']
-                            subprocess.run(cmd, input=b'\xFF', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(b'\xFF') if isinstance(b'\xFF', bytes) else 1
-                        except: pass
-                        time.sleep(20)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '4500']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(b'\xFF')
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += 1
+                                    time.sleep(20)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.IKEV2_KEEPALIVE.value:
                     # Node 2: IKEv2 Keepalive (UDP 500)
@@ -564,12 +574,22 @@ class KeepAliveEngine:
                             rspi = b'\x00' * 8
                             # struct: ispi(8), rspi(8), next(1), ver(1), exch(1), flags(1), msgid(4), len(4)
                             header = ispi + rspi + struct.pack('!BBBBII', 0, 0x20, 37, 0, 0, 28)
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '500']
-                            subprocess.run(cmd, input=header, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(header) if isinstance(header, bytes) else 1
-                        except: pass
-                        time.sleep(30)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '500']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(header)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(header)
+                                    time.sleep(30)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.WIREGUARD_HEARTBEAT.value:
                     # Node 3: WireGuard Silent Heartbeat (UDP 51820)
@@ -579,12 +599,22 @@ class KeepAliveEngine:
                             # WireGuard Handshake Initiation (Type 1) - 148 bytes
                             sender_idx = os.urandom(4)
                             packet = b'\x01\x00\x00\x00' + sender_idx + os.urandom(140)
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '51820']
-                            subprocess.run(cmd, input=packet, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(packet) if isinstance(packet, bytes) else 1
-                        except: pass
-                        time.sleep(60)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '51820']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(packet)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(packet)
+                                    time.sleep(60)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.SIP_GHOST.value:
                     # Node 4: SIP REGISTER Ghost Call (UDP 5060)
@@ -600,33 +630,47 @@ class KeepAliveEngine:
                                 "CSeq: 1 OPTIONS\r\n"
                                 "Content-Length: 0\r\n\r\n"
                             ).encode()
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
-                            subprocess.run(cmd, input=sip_msg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(sip_msg) if isinstance(sip_msg, bytes) else 1
-                        except: pass
-                        time.sleep(45)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(sip_msg)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(sip_msg)
+                                    time.sleep(45)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.STUN_BINDING.value:
                     # Node 5: STUN Binding (UDP 19302)
                     target_ip = self._resolve_dns64(adb, "stun.l.google.com")
                     while self.running and node.strategy_gen == gen:
                         try:
-                            s = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
-                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                            s.settimeout(10)
+                            # Send a STUN Binding Request (Hex encoded)
+                            # 00 01 (Binding Request), 00 00 (Length), Magic Cookie + Transaction ID
+                            stun_req = b'\x00\x01\x00\x00' + os.urandom(16)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             
                             while self.running and node.strategy_gen == gen:
-                                # 20-byte STUN Binding Request
-                                header = struct.pack('!HHI', 0x0001, 0x0000, 0x2112A442) + os.urandom(12)
-                                s.sendto(header, (target_ip, 19302))
-                                node.pulse_count += 1
-                                node.bytes_sent += len(header)
-                                time.sleep(15)
-                        except: time.sleep(5)
-                        finally:
-                            try: s.close()
-                            except: pass
+                                try:
+                                    proc.stdin.write(stun_req)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(stun_req)
+                                    time.sleep(15)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.FCM_LONG_POLL.value:
                     # Node 6: FCM / APNs Long-Poll Mimic (TCP 5228)
@@ -655,12 +699,22 @@ class KeepAliveEngine:
                         try:
                             # Minimal DTLS ClientHello (simplified)
                             dtls_hello = b'\x16\xfe\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40' + os.urandom(64)
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
-                            subprocess.run(cmd, input=dtls_hello, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(dtls_hello) if isinstance(dtls_hello, bytes) else 1
-                        except: pass
-                        time.sleep(10)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(dtls_hello)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(dtls_hello)
+                                    time.sleep(10)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.OPENVPN_PING.value:
                     # Node 8: OpenVPN TLS-Auth Ping (UDP 1194)
@@ -669,12 +723,22 @@ class KeepAliveEngine:
                         try:
                             # P_CONTROL_HARD_RESET_CLIENT_V2 (opcode 0x38)
                             packet = b'\x38' + os.urandom(8) + struct.pack('!I', int(time.time()))
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '1194']
-                            subprocess.run(cmd, input=packet, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(packet) if isinstance(packet, bytes) else 1
-                        except: pass
-                        time.sleep(20)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '1194']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(packet)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(packet)
+                                    time.sleep(20)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.COAP_OBSERVE.value:
                     # Node 9: CoAP Observe (UDP 5683)
@@ -683,12 +747,22 @@ class KeepAliveEngine:
                         try:
                             # CoAP GET with Observe option
                             header = b'\x50\x01\x00\x01\x60'
-                            cmd = ['nc', '-u', '-w', '2', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5683']
-                            subprocess.run(cmd, input=header, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            node.pulse_count += 1
-                            node.bytes_sent += len(header) if isinstance(header, bytes) else 1
-                        except: pass
-                        time.sleep(15)
+                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5683']
+                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            while self.running and node.strategy_gen == gen:
+                                try:
+                                    proc.stdin.write(header)
+                                    proc.stdin.flush()
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(header)
+                                    time.sleep(15)
+                                except:
+                                    break
+                            proc.terminate()
+                        except:
+                            pass
+                        time.sleep(5)
 
                 elif strategy == KeepaliveStrategy.HTTP2_PING.value:
                     # Node 10: HTTP/2 Multiplexed PING (TCP 443)
