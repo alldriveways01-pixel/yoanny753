@@ -54,8 +54,8 @@ def main():
         print(Fore.RED + "[!] Failed to initialize. Is the phone connected via ADB?")
         return
 
-    print(Fore.BLUE + f"[*] Deploying 1 node with NAT64 Exploit...")
-    if not core.deploy_nodes(node_count=1):
+    print(Fore.BLUE + f"[*] Deploying {core.node_count} nodes with NAT64 Exploit...")
+    if not core.deploy_nodes(node_count=10):
         print(Fore.RED + "[!] Deployment failed. Check logs for details.")
         return
 
