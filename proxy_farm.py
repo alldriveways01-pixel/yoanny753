@@ -16,6 +16,7 @@ import sys
 import socket
 import ssl
 import random
+import struct
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -50,22 +51,16 @@ logger.addHandler(file_handler)
 # ─────────────────────────────────────────────────────────────
 class KeepaliveStrategy(Enum):
     DRIFT = "drift"
-    SESSION_HTTPS = "session_https"
-    SSE_STREAM = "sse_stream"
-    SIM_BROWSING = "sim_browsing"
-    TCP_NULL_DRIP = "tcp_null_drip"
-    UDP_DRIP = "udp_drip"
-    OS_KEEPALIVE = "os_keepalive"
-    ICMP_PING6 = "icmp_ping6"
-    # New Elite Strategies
+    NAT_T_KEEPALIVE = "nat_t_keepalive"
+    IKEV2_KEEPALIVE = "ikev2_keepalive"
+    WIREGUARD_HEARTBEAT = "wireguard_heartbeat"
+    SIP_GHOST = "sip_ghost"
     STUN_BINDING = "stun_binding"
-    DNS_TUNNEL = "dns_tunnel"
-    QUIC_STREAM = "quic_stream"
-    WEBSOCKET_PIN = "websocket_pin"
-    TLS_RESUME = "tls_resume"
-    MQTT_PING = "mqtt_ping"
-    NTP_PULSE = "ntp_pulse"
-    VOIP_SIM = "voip_sim"
+    FCM_LONG_POLL = "fcm_long_poll"
+    DTLS_SIM = "dtls_sim"
+    OPENVPN_PING = "openvpn_ping"
+    COAP_OBSERVE = "coap_observe"
+    HTTP2_PING = "http2_ping"
 
 @dataclass
 class Node:
@@ -421,19 +416,9 @@ class SeekerAndBucket:
             current_unique = set()
             active_anchors = set() # Track IPs already anchored in this sweep
             
-            # Battle Royale: Assign different strategies to each node for testing
-            # We prioritize the "Winners" and fill with the 8 new "Elite" strategies
+            # Battle Royale: Assign the "Holy Grail" 10 strategies
             strategies = [
-                KeepaliveStrategy.SESSION_HTTPS.value, # Winner 1
-                KeepaliveStrategy.ICMP_PING6.value,    # Winner 2
-                KeepaliveStrategy.STUN_BINDING.value,  # Elite 1
-                KeepaliveStrategy.DNS_TUNNEL.value,    # Elite 2
-                KeepaliveStrategy.QUIC_STREAM.value,   # Elite 3
-                KeepaliveStrategy.WEBSOCKET_PIN.value, # Elite 4
-                KeepaliveStrategy.TLS_RESUME.value,    # Elite 5
-                KeepaliveStrategy.MQTT_PING.value,     # Elite 6
-                KeepaliveStrategy.NTP_PULSE.value,     # Elite 7
-                KeepaliveStrategy.VOIP_SIM.value       # Elite 8
+                KeepaliveStrategy.STUN_BINDING.value
             ]
             
             # 1. Ensure all nodes have a strategy (Battle Royale)
@@ -502,15 +487,13 @@ class SeekerAndBucket:
         return self.stats
 
 # ─────────────────────────────────────────────────────────────
-# CORE ORCHESTRATOR
-# ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
 # KEEP-ALIVE ENGINE (The Lab)
 # ─────────────────────────────────────────────────────────────
 class KeepAliveEngine:
     def __init__(self):
         self.running = True
         self._dns_cache = {}
+        self.active_threads = [] # For UI compatibility
 
     def start_strategy(self, node: Node, strategy: str, concurrency: int = 3):
         """Starts the strategy with multiple concurrent threads using Generation Locking."""
@@ -529,10 +512,10 @@ class KeepAliveEngine:
                 daemon=True
             )
             t.start()
+            self.active_threads.append(t)
 
-    def stop_strategy(self, node_id: int):
-        # We don't need to do anything here, the threads will die when strategy_gen increments
-        pass
+    def stop_strategy(self, node: Node):
+        node.strategy_gen += 1
 
     def stop_all(self):
         self.running = False
@@ -559,288 +542,183 @@ class KeepAliveEngine:
         
         while self.running and node.strategy_gen == gen:
             try:
-                if strategy == KeepaliveStrategy.SESSION_HTTPS.value:
-                    target_ip = self._resolve_dns64(adb, "api.ipify.org")
-                    
-                    node_log(f"Connecting to Proxy 127.0.0.1:{node.external_port}...")
-                    s = socks.socksocket()
-                    s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.settimeout(15)
-                    
-                    try:
-                        s.connect((target_ip, 443))
-                        node_log("Proxy Connection Established. Starting SSL Handshake...")
-                        
-                        ctx = ssl.create_default_context()
-                        ss = ctx.wrap_socket(s, server_hostname="api.ipify.org")
-                        node_log("Nuclear SSL Session Active. Pulsing...")
-                        
-                        while self.running and node.strategy_gen == gen:
-                            try:
-                                req = b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: keep-alive\r\n\r\n"
-                                ss.sendall(req)
-                                node.bytes_sent += len(req)
-                                
-                                ss.settimeout(5)
-                                resp = ss.recv(1024)
-                                if resp:
-                                    node.pulse_count += 1
-                                
-                                time.sleep(1)
-                            except Exception as e:
-                                node_log(f"Pulse error: {e}")
-                                break
-                        ss.close()
-                    except Exception as e:
-                        node_log(f"Connection/SSL error: {e}")
-                        time.sleep(2)
-                    finally:
-                        s.close()
-
-                elif strategy == KeepaliveStrategy.SSE_STREAM.value:
-                    target_ip = self._resolve_dns64(adb, "stream.wikimedia.org")
-                    # Use curl with --resolve to handle SSL/SNI correctly over IPv6 literal
-                    cmd = [
-                        'curl', '-g', '-N', '-s', '-k',
-                        '--socks5-hostname', f'127.0.0.1:{node.external_port}',
-                        '--resolve', f'stream.wikimedia.org:443:{target_ip}',
-                        'https://stream.wikimedia.org/v2/stream/recentchange'
-                    ]
+                if strategy == KeepaliveStrategy.NAT_T_KEEPALIVE.value:
+                    # Node 1: IPsec NAT-T Mimic (UDP 4500)
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
-                        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                        for line in iter(proc.stdout.readline, b''):
-                            if not self.running or node.strategy_gen != gen: break
-                            if line:
-                                node.pulse_count += 1
-                                node.bytes_sent += len(line)
-                        proc.terminate()
-                        if self.running and node.strategy_gen == gen:
-                            time.sleep(2) # Restart delay
-
-                elif strategy == KeepaliveStrategy.SIM_BROWSING.value:
-                    hosts = ["api.ipify.org", "www.google.com", "www.wikipedia.org"]
-                    while self.running and node.strategy_gen == gen:
-                        host = random.choice(hosts)
-                        target_ip = self._resolve_dns64(adb, host)
-                        s = socks.socksocket()
-                        s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                        s.settimeout(10)
                         try:
-                            s.connect((target_ip, 80))
-                            req = f"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
-                            s.sendall(req)
-                            node.bytes_sent += len(req)
-                            if s.recv(1024): node.pulse_count += 1
-                        except: pass
-                        finally: s.close()
-                        time.sleep(random.randint(2, 5))
-
-                elif strategy == KeepaliveStrategy.TCP_NULL_DRIP.value:
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
-                    s = socks.socksocket()
-                    s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.settimeout(10)
-                    try:
-                        s.connect((target_ip, 53))
-                        while self.running and node.strategy_gen == gen:
-                            s.sendall(b'\x00')
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '4500']
+                            subprocess.run(cmd, input=b'\xFF', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            node.pulse_count += 1
                             node.bytes_sent += 1
-                            node.pulse_count += 1
-                            time.sleep(2)
-                    except: pass
-                    finally: s.close()
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
 
-                elif strategy == KeepaliveStrategy.UDP_DRIP.value:
-                    # Use raw socket for UDP to avoid PySocks limitations
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
+                elif strategy == KeepaliveStrategy.IKEV2_KEEPALIVE.value:
+                    # Node 2: IKEv2 Keepalive (UDP 500)
+                    target_ip = "8.8.8.8"
                     while self.running and node.strategy_gen == gen:
                         try:
-                            # We use a simple trick: send a UDP packet to the proxy's UDP associate port
-                            # But since we don't have a full SOCKS5 UDP client here, we'll use 'nc'
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '53']
-                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            while self.running and node.strategy_gen == gen:
-                                proc.stdin.write(b'\x00')
-                                proc.stdin.flush()
-                                node.pulse_count += 1
-                                node.bytes_sent += 1
-                                time.sleep(1)
-                                if proc.poll() is not None: break
-                            proc.terminate()
-                        except: pass
-                        time.sleep(2)
-
-                elif strategy == KeepaliveStrategy.OS_KEEPALIVE.value:
-                    # Target api.ipify.org via Proxy with OS-level keep-alives
-                    target_ip = self._resolve_dns64(adb, "api.ipify.org")
-                    s = socks.socksocket()
-                    s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    try:
-                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
-                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
-                        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 10)
-                    except: pass
-                    try:
-                        s.connect((target_ip, 80))
-                        while self.running and node.strategy_gen == gen:
-                            time.sleep(5)
-                    except: pass
-                    finally: s.close()
-
-                elif strategy == KeepaliveStrategy.ICMP_PING6.value:
-                    target_ip = self._resolve_dns64(adb, "api.ipify.org")
-                    cmd = ['adb', 'shell', 'su', '-c', f"ping6 -I {node.ipv6_address} -i 0.5 {target_ip}"]
-                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                    while self.running and node.strategy_gen == gen:
-                        line = proc.stdout.readline()
-                        if line:
+                            # Construct 28-byte IKEv2 INFORMATIONAL header
+                            ispi = os.urandom(8)
+                            rspi = b'\x00' * 8
+                            # struct: ispi(8), rspi(8), next(1), ver(1), exch(1), flags(1), msgid(4), len(4)
+                            header = ispi + rspi + struct.pack('!BBBBII', 0, 0x20, 37, 0, 0, 28)
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '500']
+                            subprocess.run(cmd, input=header, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             node.pulse_count += 1
-                            node.bytes_sent += 64 # ICMP packet size
-                        if proc.poll() is not None: break
-                    if proc.poll() is None: proc.terminate()
+                            node.bytes_sent += len(header)
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
+
+                elif strategy == KeepaliveStrategy.WIREGUARD_HEARTBEAT.value:
+                    # Node 3: WireGuard Silent Heartbeat (UDP 51820)
+                    target_ip = "8.8.8.8"
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            # WireGuard Handshake Initiation (Type 1) - 148 bytes
+                            sender_idx = os.urandom(4)
+                            packet = b'\x01\x00\x00\x00' + sender_idx + os.urandom(140)
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '51820']
+                            subprocess.run(cmd, input=packet, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            node.pulse_count += 1
+                            node.bytes_sent += len(packet)
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
+
+                elif strategy == KeepaliveStrategy.SIP_GHOST.value:
+                    # Node 4: SIP REGISTER Ghost Call (UDP 5060)
+                    target_ip = "sip.linphone.org"
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            sip_msg = (
+                                "OPTIONS sip:100@sip.com SIP/2.0\r\n"
+                                "Via: SIP/2.0/UDP 192.168.1.2:5060\r\n"
+                                "From: <sip:ping@sip.com>\r\n"
+                                "To: <sip:ping@sip.com>\r\n"
+                                "Call-ID: 123456789\r\n"
+                                "CSeq: 1 OPTIONS\r\n"
+                                "Content-Length: 0\r\n\r\n"
+                            ).encode()
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
+                            subprocess.run(cmd, input=sip_msg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            node.pulse_count += 1
+                            node.bytes_sent += len(sip_msg)
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
 
                 elif strategy == KeepaliveStrategy.STUN_BINDING.value:
-                    # STUN is the NAT-pinning king
-                    target_ip = self._resolve_dns64(adb, "stun.l.google.com")
+                    # Node 5: STUN Binding (UDP 19302)
+                    target_ip = "stun.l.google.com"
                     while self.running and node.strategy_gen == gen:
-                        # Send a STUN Binding Request (hex encoded)
-                        # 00 01 (Binding Request) 00 00 (Length) ...
-                        stun_req = b'\x00\x01\x00\x00' + os.urandom(16)
-                        cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
-                        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         try:
-                            proc.stdin.write(stun_req)
-                            proc.stdin.flush()
+                            # Send a STUN Binding Request (Hex encoded)
+                            # 00 01 (Binding Request), 00 00 (Length), Magic Cookie + Transaction ID
+                            stun_req = b'\x00\x01\x00\x00' + os.urandom(16)
+                            # Removed -u to force TCP. microsocks doesn't support UDP Associate.
+                            # TCP SYN retries keep the NAT state alive.
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '19302']
+                            subprocess.run(cmd, input=stun_req, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             node.pulse_count += 1
                             node.bytes_sent += len(stun_req)
-                        except: pass
-                        time.sleep(2)
-                        proc.terminate()
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
 
-                elif strategy == KeepaliveStrategy.DNS_TUNNEL.value:
-                    # DNS queries are often prioritized by carriers
-                    while self.running and node.strategy_gen == gen:
-                        rand_sub = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=8))
-                        target = f"{rand_sub}.google.com"
-                        # Use dig through proxy if possible, or just socket resolution
-                        try:
-                            # We use a simple socket connect to port 53 to simulate a query
-                            s = socks.socksocket()
-                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                            s.settimeout(5)
-                            s.connect(("8.8.8.8", 53))
-                            s.sendall(os.urandom(32)) # Random DNS-like payload
-                            node.pulse_count += 1
-                            node.bytes_sent += 32
-                            s.close()
-                        except: pass
-                        time.sleep(3)
-
-                elif strategy == KeepaliveStrategy.QUIC_STREAM.value:
-                    # Simulate HTTP/3 UDP traffic
-                    target_ip = self._resolve_dns64(adb, "www.google.com")
-                    while self.running and node.strategy_gen == gen:
-                        try:
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
-                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            for _ in range(10):
-                                if not self.running or node.strategy_gen != gen: break
-                                proc.stdin.write(os.urandom(128))
-                                proc.stdin.flush()
-                                node.pulse_count += 1
-                                node.bytes_sent += 128
-                                time.sleep(0.5)
-                            proc.terminate()
-                        except: pass
-                        time.sleep(2)
-
-                elif strategy == KeepaliveStrategy.WEBSOCKET_PIN.value:
-                    # Long-lived TCP connection with frequent small frames
+                elif strategy == KeepaliveStrategy.FCM_LONG_POLL.value:
+                    # Node 6: FCM / APNs Long-Poll Mimic (TCP 5228)
+                    target_ip = "mtalk.google.com"
                     while self.running and node.strategy_gen == gen:
                         try:
                             s = socks.socksocket()
                             s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                            s.settimeout(10)
-                            s.connect(("echo.websocket.org", 80))
-                            # Send a mock WS upgrade
-                            s.sendall(b"GET / HTTP/1.1\r\nHost: echo.websocket.org\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-                            while self.running and node.strategy_gen == gen:
-                                s.sendall(b'\x81\x01\x00') # WS Ping frame
-                                node.pulse_count += 1
-                                node.bytes_sent += 3
-                                time.sleep(5)
-                        except: break
-                        finally: s.close()
-
-                elif strategy == KeepaliveStrategy.TLS_RESUME.value:
-                    # Rapid TLS handshakes
-                    hosts = ["www.google.com", "www.cloudflare.com", "www.facebook.com"]
-                    while self.running and node.strategy_gen == gen:
-                        host = random.choice(hosts)
-                        try:
-                            s = socks.socksocket()
-                            s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                            s.settimeout(5)
-                            s.connect((host, 443))
+                            s.settimeout(15)
+                            s.connect((target_ip, 5228))
                             ctx = ssl.create_default_context()
-                            with ctx.wrap_socket(s, server_hostname=host) as ss:
-                                node.pulse_count += 1
-                                node.bytes_sent += 512 # Handshake size approx
-                            s.close()
-                        except: pass
-                        time.sleep(random.randint(2, 5))
+                            with ctx.wrap_socket(s, server_hostname="mtalk.google.com") as ss:
+                                while self.running and node.strategy_gen == gen:
+                                    # App-level ping: 0x00
+                                    ss.sendall(b'\x00')
+                                    node.pulse_count += 1
+                                    node.bytes_sent += 1
+                                    time.sleep(180) # 3 minutes
+                        except: time.sleep(5)
+                        finally: s.close()
 
-                elif strategy == KeepaliveStrategy.MQTT_PING.value:
-                    # IoT style pings
+                elif strategy == KeepaliveStrategy.DTLS_SIM.value:
+                    # Node 7: WebRTC DTLS Simulation (UDP 443)
+                    target_ip = "8.8.8.8"
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            # Minimal DTLS ClientHello (simplified)
+                            dtls_hello = b'\x16\xfe\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40' + os.urandom(64)
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '443']
+                            subprocess.run(cmd, input=dtls_hello, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            node.pulse_count += 1
+                            node.bytes_sent += len(dtls_hello)
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
+
+                elif strategy == KeepaliveStrategy.OPENVPN_PING.value:
+                    # Node 8: OpenVPN TLS-Auth Ping (UDP 1194)
+                    target_ip = "8.8.8.8"
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            # P_CONTROL_HARD_RESET_CLIENT_V2 (opcode 0x38)
+                            packet = b'\x38' + os.urandom(8) + struct.pack('!I', int(time.time()))
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '1194']
+                            subprocess.run(cmd, input=packet, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            node.pulse_count += 1
+                            node.bytes_sent += len(packet)
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
+
+                elif strategy == KeepaliveStrategy.COAP_OBSERVE.value:
+                    # Node 9: CoAP Observe (UDP 5683)
+                    target_ip = "californium.eclipseprojects.io"
+                    while self.running and node.strategy_gen == gen:
+                        try:
+                            # CoAP GET with Observe option
+                            header = b'\x50\x01\x00\x01\x60'
+                            cmd = ['nc', '-w', '1', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5683']
+                            subprocess.run(cmd, input=header, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            node.pulse_count += 1
+                            node.bytes_sent += len(header)
+                            time.sleep(1)
+                        except:
+                            time.sleep(1)
+
+                elif strategy == KeepaliveStrategy.HTTP2_PING.value:
+                    # Node 10: HTTP/2 Multiplexed PING (TCP 443)
+                    target_ip = "www.google.com"
                     while self.running and node.strategy_gen == gen:
                         try:
                             s = socks.socksocket()
                             s.set_proxy(socks.SOCKS5, "127.0.0.1", node.external_port)
-                            s.settimeout(10)
-                            s.connect(("broker.hivemq.com", 1883))
-                            # MQTT Connect
-                            s.sendall(b'\x10\x0c\x00\x04MQTT\x04\x02\x00\x3c\x00\x00')
-                            while self.running and node.strategy_gen == gen:
-                                s.sendall(b'\xc0\x00') # MQTT PINGREQ
-                                node.pulse_count += 1
-                                node.bytes_sent += 2
-                                time.sleep(10)
-                        except: break
+                            s.settimeout(15)
+                            s.connect((target_ip, 443))
+                            ctx = ssl.create_default_context()
+                            ctx.set_alpn_protocols(['h2'])
+                            with ctx.wrap_socket(s, server_hostname="www.google.com") as ss:
+                                # Send HTTP/2 Connection Preface
+                                ss.sendall(b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n')
+                                # Send initial SETTINGS frame (empty)
+                                ss.sendall(b'\x00\x00\x00\x04\x00\x00\x00\x00\x00')
+                                while self.running and node.strategy_gen == gen:
+                                    # HTTP/2 PING frame (9 bytes header + 8 bytes data)
+                                    ping_frame = b'\x00\x00\x08\x06\x00\x00\x00\x00\x00' + os.urandom(8)
+                                    ss.sendall(ping_frame)
+                                    node.pulse_count += 1
+                                    node.bytes_sent += len(ping_frame)
+                                    time.sleep(10)
+                        except: time.sleep(5)
                         finally: s.close()
-
-                elif strategy == KeepaliveStrategy.NTP_PULSE.value:
-                    while self.running and node.strategy_gen == gen:
-                        try:
-                            # NTP Request packet
-                            ntp_req = b'\x1b' + 47 * b'\0'
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', 'pool.ntp.org', '123']
-                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            proc.stdin.write(ntp_req)
-                            proc.stdin.flush()
-                            node.pulse_count += 1
-                            node.bytes_sent += len(ntp_req)
-                            time.sleep(5)
-                            proc.terminate()
-                        except: pass
-
-                elif strategy == KeepaliveStrategy.VOIP_SIM.value:
-                    # Simulating a constant stream of RTP packets
-                    target_ip = self._resolve_dns64(adb, "8.8.8.8")
-                    while self.running and node.strategy_gen == gen:
-                        try:
-                            cmd = ['nc', '-u', '-x', f'127.0.0.1:{node.external_port}', '-X', '5', target_ip, '5060']
-                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            for _ in range(50):
-                                if not self.running or node.strategy_gen != gen: break
-                                proc.stdin.write(os.urandom(160)) # 20ms of G.711 audio
-                                proc.stdin.flush()
-                                node.pulse_count += 1
-                                node.bytes_sent += 160
-                                time.sleep(0.02) # 20ms interval
-                            proc.terminate()
-                        except: pass
-                        time.sleep(1)
 
                 else:
                     time.sleep(5)
