@@ -496,8 +496,54 @@ class SeekerAndBucket:
         return self.stats
 
 # ─────────────────────────────────────────────────────────────
-# CORE ORCHESTRATOR
+# KEEP-ALIVE ENGINE (The Lab)
 # ─────────────────────────────────────────────────────────────
+class KeepAliveEngine:
+    def __init__(self):
+        self.running = True
+        self._dns_cache = {}
+        self.active_threads = [] # For UI compatibility
+
+    def start_strategy(self, node: Node, strategy: str, concurrency: int = 3):
+        """Starts the strategy with multiple concurrent threads using Generation Locking."""
+        node.strategy = strategy
+        node.strategy_gen += 1 # Increment generation to kill old threads
+        node.pulse_count = 0
+        node.bytes_sent = 0
+        
+        current_gen = node.strategy_gen
+        logger.info(f"🚀 Starting NUCLEAR Keep-Alive [{strategy}] on Node {node.node_id} (Gen {current_gen})")
+        
+        for i in range(concurrency):
+            t = threading.Thread(
+                target=self._run_strategy, 
+                args=(node, strategy, i, current_gen), 
+                daemon=True
+            )
+            t.start()
+            self.active_threads.append(t)
+
+    def stop_strategy(self, node: Node):
+        node.strategy_gen += 1
+
+    def stop_all(self):
+        self.running = False
+
+    def _resolve_dns64(self, adb: ADBController, hostname: str) -> str:
+        """Resolves a hostname to its DNS64 IPv6 address using the phone's native DNS with caching."""
+        if hostname in self._dns_cache:
+            return self._dns_cache[hostname]
+            
+        out = adb.run_shell(f"ping6 -c 1 {hostname}")
+        for line in out.split('\n'):
+            if 'PING' in line:
+                match = re.search(r'\((.*?)\)', line)
+                if match:
+                    res = match.group(1)
+                    self._dns_cache[hostname] = res
+                    return res
+        return hostname
+
     def _run_strategy(self, node: Node, strategy: str, thread_idx: int, gen: int):
         """Executes the selected keep-alive strategy with Generation Locking and Deep Logging."""
         adb = ADBController()
